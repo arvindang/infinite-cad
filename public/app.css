@@ -134,8 +134,8 @@ body.tree-open .tree-panel { display: block; }
 
 /* ---------- the agent holds the edit lock ---------- */
 .working {
-  position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 9;
-  display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; max-width: calc(100vw - 24px);
+  position: fixed; top: 60px; left: 12px; right: 12px; margin-inline: auto; width: fit-content; z-index: 9;
+  display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px;
   background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); white-space: nowrap;
 }
 .working b { font-weight: 600; }
@@ -144,7 +144,8 @@ body.tree-open .tree-panel { display: block; }
 .pulse { flex: none; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.3; transform: scale(0.7); } }
 @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
-body.tree-open .working, body.tree-open .sel-bar { left: calc(50% + var(--tree) / 2 + 6px); max-width: calc(100vw - var(--tree) - 48px); }
+/* centered over the canvas, not the window, when the tree panel is open */
+body.tree-open .working, body.tree-open .sel-bar, body.tree-open .toast { left: calc(var(--tree) + 24px); }
 
 /* ---------- build errors: keep the last good part, say why ---------- */
 .errors {
@@ -161,8 +162,8 @@ body.working-on .errors { top: 104px; }
 
 /* ---------- selection bar ---------- */
 .sel-bar {
-  position: fixed; left: 50%; bottom: calc(var(--dock) + 16px); transform: translateX(-50%); z-index: 8;
-  display: flex; align-items: center; gap: 10px; max-width: calc(100vw - 24px); padding: 4px 4px 4px 10px;
+  position: fixed; left: 12px; right: 12px; margin-inline: auto; width: fit-content; bottom: calc(var(--dock) + 16px); z-index: 8;
+  display: flex; align-items: center; gap: 10px; padding: 4px 4px 4px 10px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
 }
 .sel-bar.idle { padding: 7px 12px; color: var(--muted); }
@@ -175,11 +176,11 @@ body.working-on .errors { top: 104px; }
 
 /* ---------- toast ---------- */
 .toast {
-  position: fixed; left: 50%; bottom: calc(var(--dock) + 70px); transform: translate(-50%, 8px); z-index: 30;
-  padding: 8px 14px; border-radius: 8px; background: var(--text); color: var(--bg); opacity: 0; transition: 0.18s;
-  pointer-events: none; max-width: min(560px, calc(100vw - 24px)); text-align: center;
+  position: fixed; left: 12px; right: 12px; margin-inline: auto; width: fit-content; bottom: calc(var(--dock) + 70px); transform: translateY(8px); z-index: 30;
+  padding: 8px 14px; border-radius: 8px; background: var(--text); color: var(--bg); opacity: 0; transition: opacity 0.18s, transform 0.18s;
+  pointer-events: none; max-width: 560px; text-align: center;
 }
-.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.show { opacity: 1; transform: none; }
 .toast code { font: 12px var(--mono); opacity: 0.8; overflow-wrap: anywhere; }
 
 /* ---------- empty, trashed, connect ---------- */
@@ -270,7 +271,7 @@ body.tree-open .empty { padding-left: calc(var(--tree) + 24px); }
   .tree-panel { top: auto; left: 8px; right: 8px; width: auto; max-width: 420px; margin: 0 auto; bottom: calc(var(--dock) + 8px); max-height: 42dvh; border-radius: 14px; }
   .row { min-height: 34px; }
   .row.role, .row.inst { min-height: 32px; }
-  body.tree-open .sel-bar, body.tree-open .working { left: 50%; max-width: calc(100vw - 24px); }
+  body.tree-open .sel-bar, body.tree-open .working, body.tree-open .toast { left: 12px; }
   body.tree-open .sel-bar { bottom: calc(var(--dock) + 42dvh + 16px); }
   body.view-open .sel-bar { display: none; }
   .sel-bar { bottom: calc(var(--dock) + 8px); }

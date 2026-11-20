@@ -2,7 +2,9 @@
 // and copies links (…/m/<id>?v=<n>#base.top,mount-holes:2) to paste back to the agent.
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { type Body, disposeBody, toBody, toStl } from "./mesh";
+import { type Body, disposeBody, toBody } from "./mesh";
+import { type ExportFormat, FORMATS, exportBodies } from "./export";
+import { type Dim, DimLayer, type Unit, UNITS, boxDims, faceDims } from "./measure";
 import type { BuildReply, BuildRequest } from "./kernel-worker";
 import { parseRef, type CadDoc, type Ref } from "../src/schema.ts";
 import { $, MOD, copy, escapeHtml, prefs, rememberModel, toast, viewerId, wireCopyButtons } from "./shared";
@@ -30,8 +32,8 @@ type Theme = "light" | "dark";
 const sysDark = matchMedia("(prefers-color-scheme: dark)");
 let theme: Theme = prefs.get<Theme | null>("theme", null) ?? (sysDark.matches ? "dark" : "light");
 const PALETTE = {
-  light: { bg: 0xececea, body: 0xc4c7cc, edge: 0x2b2d31, grid1: 0xdadad6, grid2: 0xc6c6c2, accent: 0x4f46e5, flash: 0xf59e0b },
-  dark: { bg: 0x161617, body: 0x7d8189, edge: 0x0c0c0d, grid1: 0x222224, grid2: 0x2f2f32, accent: 0x8b85ff, flash: 0xfbbf24 },
+  light: { bg: 0xececea, body: 0xc4c7cc, edge: 0x2b2d31, grid1: 0xdadad6, grid2: 0xc6c6c2, accent: 0x4f46e5, flash: 0xf59e0b, dim: 0x0b7285 },
+  dark: { bg: 0x161617, body: 0x7d8189, edge: 0x0c0c0d, grid1: 0x222224, grid2: 0x2f2f32, accent: 0x8b85ff, flash: 0xfbbf24, dim: 0x66d9e8 },
 };
 const pal = () => PALETTE[theme];
 
@@ -95,8 +97,11 @@ function setModel(meshes: Body[], next: CadDoc) {
     partIds.add(p.id);
     for (const f of p.features) partOfFeature.set(f.id, p.id);
   }
+  faceCache.clear();
+  gapCache = 0;
   sizeGrid();
   paintAll();
+  refreshDims();
 }
 const triCount = () => bodies.reduce((n, b) => n + b.triRef.length, 0);
 
@@ -183,6 +188,7 @@ function setSelection(keys: string[], opts: { fit?: boolean; hash?: boolean } = 
   if (opts.fit && selectedRefs.size) fitRefs([...selectedRefs]);
   renderSelBar();
   markTree();
+  refreshDims();
 }
 /** The address bar is always the link you'd copy. */
 function syncUrl() {
@@ -225,9 +231,11 @@ function pickAt(x: number, y: number): string | null {
   ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
   const hit = raycaster.intersectObjects(bodies.map((b) => b.mesh), false)[0];
-  if (!hit || hit.faceIndex == null) return null;
+  if (!hit?.face) return null;
   const b = bodies.find((x) => x.mesh === hit.object)!;
-  return b.refs[b.triRef[hit.faceIndex]];
+  // The BVH reorders the index it adds, so faceIndex isn't our triangle order; the
+  // non-indexed positions are (vertex / 3 = triangle).
+  return b.refs[b.triRef[Math.floor(hit.face.a / 3)]];
 }
 /** Faces mode picks the face, Features mode its instance or feature; Option goes one level up. */
 function keyFor(ref: string, up: boolean): string {
@@ -330,10 +338,25 @@ const VIEWS: Record<string, [number, number, number]> = {
   "1": [0, -1, 0], "2": [0, 1, 0], "3": [-1, 0, 0], "4": [1, 0, 0], "5": [0, -0.0001, 1], "6": [0, -0.0001, -1], "7": [1, -1, 0.8],
 };
 const VIEW_NAMES: Record<string, string> = { "1": "Front", "2": "Back", "3": "Left", "4": "Right", "5": "Top", "6": "Bottom", "7": "Iso" };
+let currentView: string | null = null;
+function markView(k: string | null) {
+  currentView = k;
+  $("#viewLabel").textContent = k ? VIEW_NAMES[k] : "View";
+  document.querySelectorAll<HTMLElement>("#viewMenu [data-view]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.view === k)));
+}
 function setView(k: string) {
   fitAll(new THREE.Vector3(...VIEWS[k]));
+  markView(k);
+  closeViewMenu();
   toast(VIEW_NAMES[k], 700);
 }
+// orbiting away from a named view drops its name from the menu button
+controls.addEventListener("end", () => {
+  if (!currentView) return;
+  const want = new THREE.Vector3(...VIEWS[currentView]).normalize();
+  const have = camera.position.clone().sub(controls.target).normalize();
+  if (want.dot(have) < 0.9995) markView(null);
+});
 function sizeGrid() {
   const box = boxOfRefs(allRefs);
   if (box.isEmpty()) box.set(new THREE.Vector3(-50, -50, 0), new THREE.Vector3(50, 50, 0));
@@ -565,7 +588,9 @@ function renderSelBar() {
     return;
   }
   const what = mode === "face" ? "face" : "feature";
-  bar.innerHTML = building && firstBuild
+  bar.innerHTML = measuring && doc.parts.length && !(building && firstBuild)
+    ? `<span class="hint">Measuring every part · <b>${coarse.matches ? "Tap" : "Click"}</b> a ${what} to measure only it${coarse.matches ? "" : ` · <kbd>U</kbd> ${unit}`}</span>`
+    : building && firstBuild
     ? `<span class="hint"><span class="pulse"></span> Building…</span>`
     : !doc.parts.length
       ? `<span class="hint">Nothing to select yet</span>`
@@ -642,6 +667,7 @@ function setTheme(t: Theme) {
   prefs.set("theme", t);
   sizeGrid();
   paintAll();
+  dimLayer.setColor(pal().dim);
 }
 let xray = false;
 function setXray(on: boolean) {
@@ -661,16 +687,133 @@ function stepFeature(dir: 1 | -1) {
   const next = ids[cur < 0 ? (dir > 0 ? 0 : ids.length - 1) : (cur + dir + ids.length) % ids.length];
   setSelection([next]);
 }
-function exportStl() {
+// ---------- measure ----------
+let measuring = false;
+let unit: Unit = UNITS.includes(prefs.get<Unit>("unit", "mm")) ? prefs.get<Unit>("unit", "mm") : "mm";
+const dimLayer = new DimLayer($("#dims"));
+scene.add(dimLayer.group);
+const faceCache = new Map<string, ReturnType<typeof faceDims>>(); // per build: ref -> its dimensions
+let gapCache = 0;
+/** How far dimension lines stand off the model: a share of its size, the same for every face. */
+function modelGap() {
+  if (!gapCache) {
+    const size = boxOfRefs(allRefs).getSize(new THREE.Vector3());
+    gapCache = Math.max(Math.max(size.x, size.y, size.z) * 0.06, 1);
+  }
+  return gapCache;
+}
+function dimsOfFace(ref: string) {
+  let d = faceCache.get(ref);
+  if (!d) {
+    const info = refInfo.get(ref)!;
+    const { start, count } = info.body.range[info.index];
+    d = faceDims(info.body.mesh.geometry.attributes.position.array as Float32Array, start, count, modelGap() * 0.6);
+    faceCache.set(ref, d);
+  }
+  return d;
+}
+/** A box's X/Y/Z, plus the Ø of every round wall inside it (which give way to the box when labels collide). */
+function dimsOfRefs(refs: string[], priority: number): Dim[] {
+  const round = refs.flatMap((r) => {
+    const f = dimsOfFace(r);
+    return f.shape === "cylinder" ? f.dims.filter((d) => d.dia).map((d) => ({ ...d, priority: priority - 1 })) : [];
+  });
+  return [...boxDims(boxOfRefs(refs), modelGap(), priority), ...round];
+}
+/** Nothing selected: every part. A selection: only what's selected (a face's own dimensions). */
+function refreshDims() {
+  if (!measuring) return;
+  const dims: Dim[] = !selection.length
+    ? bodies.flatMap((b) => dimsOfRefs(b.refs, 3))
+    : selection.flatMap((key) => {
+      const refs = expand(key);
+      if (refs.length === 1) return dimsOfFace(refs[0]).dims;
+      return refs.length ? dimsOfRefs(refs, 4) : [];
+    });
+  const gap = modelGap();
+  dimLayer.setColor(pal().dim);
+  dimLayer.set(dims, unit, gap * 0.35);
+  placeDims();
+  needsRender = true;
+}
+function placeDims() {
+  if (measuring) dimLayer.place(camera, canvas.clientWidth, canvas.clientHeight);
+}
+function setMeasuring(on: boolean) {
+  measuring = on;
+  $("#dims").hidden = !on;
+  $("#measureBtn").setAttribute("aria-pressed", String(on));
+  $("#unitBtn").hidden = !on;
+  if (on) refreshDims();
+  else dimLayer.clear();
+  renderSelBar();
+  needsRender = true;
+}
+function cycleUnit() {
+  unit = UNITS[(UNITS.indexOf(unit) + 1) % UNITS.length];
+  prefs.set("unit", unit);
+  $("#unitLabel").textContent = unit;
+  if (!measuring) setMeasuring(true);
+  else refreshDims(), renderSelBar();
+  toast(`Units: ${unit === "in" ? "inches" : unit === "m" ? "metres" : "millimetres"}`, 900);
+}
+$("#unitLabel").textContent = unit;
+
+// ---------- export ----------
+const exportMenu = $("#exportMenu");
+exportMenu.innerHTML = FORMATS.map((f, i) =>
+  `<button class="menu-item" role="menuitem" data-export="${f.id}" title="Download ${f.label}"><span><span class="fmt">${f.label}</span> <span class="note">${f.note}</span></span><kbd>${i + 1}</kbd></button>`).join("");
+function openExportMenu() {
+  exportMenu.hidden = false;
+  $("#exportBtn").setAttribute("aria-expanded", "true");
+  exportMenu.querySelector<HTMLElement>(".menu-item")!.focus();
+}
+function closeExportMenu() {
+  exportMenu.hidden = true;
+  $("#exportBtn").setAttribute("aria-expanded", "false");
+}
+async function exportAs(id: ExportFormat["id"]) {
+  closeExportMenu();
   if (!bodies.length) return void toast("Nothing to export yet");
-  const name = (state?.name || "model").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "model";
+  const f = FORMATS.find((x) => x.id === id)!;
+  const title = state?.name || "model";
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "model";
+  const file = `${slug}-v${shownVersion}.${f.ext}`;
+  let blob: Blob;
+  try {
+    blob = await exportBodies(id, bodies, title);
+  } catch (err) {
+    console.error(err);
+    return void toast(`Couldn't export ${f.label}. Try again.`);
+  }
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(toStl(bodies));
-  a.download = `${name}-v${shownVersion}.stl`;
+  a.href = URL.createObjectURL(blob);
+  a.download = file;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  toast(`Downloading ${escapeHtml(a.download)} (mm)`);
+  toast(`Downloading ${escapeHtml(file)}`);
 }
+$("#exportBtn").addEventListener("click", () => (exportMenu.hidden ? openExportMenu() : closeExportMenu()));
+exportMenu.addEventListener("click", (e) => {
+  const id = (e.target as Element).closest<HTMLElement>("[data-export]")?.dataset.export;
+  if (id) exportAs(id as ExportFormat["id"]);
+});
+exportMenu.addEventListener("keydown", (e) => {
+  const items = [...exportMenu.querySelectorAll<HTMLElement>(".menu-item")];
+  const i = items.indexOf(document.activeElement as HTMLElement);
+  const step = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+  const n = Number(e.key);
+  if (n >= 1 && n <= FORMATS.length) exportAs(FORMATS[n - 1].id);
+  else if (e.key === "Home" || e.key === "End") items[e.key === "Home" ? 0 : items.length - 1].focus();
+  else if (step) items[(i + step + items.length) % items.length].focus();
+  else if (e.key === "Escape" || e.code === "KeyE") closeExportMenu(), $("#exportBtn").focus();
+  else return;
+  e.preventDefault();
+  e.stopPropagation();
+});
+addEventListener("pointerdown", (e) => {
+  if (!exportMenu.hidden && !(e.target as Element).closest("#exportWrap")) closeExportMenu();
+});
 
 // ---------- delete / restore ----------
 let deleteArmed = 0;
@@ -744,11 +887,36 @@ function closeViewSheet() {
   document.body.classList.remove("view-open");
   $("#viewBtn").setAttribute("aria-expanded", "false");
 }
+function openViewMenu() {
+  $("#viewMenu").hidden = false;
+  $("#viewMenuBtn").setAttribute("aria-expanded", "true");
+  ($("#viewMenu [aria-checked='true']") ?? $("#viewMenu .menu-item")).focus();
+}
+function closeViewMenu() {
+  $("#viewMenu").hidden = true;
+  $("#viewMenuBtn").setAttribute("aria-expanded", "false");
+}
 function closePops() {
   $("#connectPop").hidden = true;
   $("#connectBtn").setAttribute("aria-expanded", "false");
+  closeViewMenu();
+  closeExportMenu();
   closeViewSheet();
 }
+$("#viewMenuBtn").addEventListener("click", () => ($("#viewMenu").hidden ? openViewMenu() : closeViewMenu()));
+$("#viewMenu").addEventListener("keydown", (e) => {
+  const items = [...$("#viewMenu").querySelectorAll<HTMLElement>(".menu-item")];
+  const i = items.indexOf(document.activeElement as HTMLElement);
+  const step = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+  if (e.key === "Home" || e.key === "End") items[e.key === "Home" ? 0 : items.length - 1].focus();
+  else if (step) items[(i + step + items.length) % items.length].focus();
+  else return;
+  e.preventDefault();
+  e.stopPropagation();
+});
+addEventListener("pointerdown", (e) => {
+  if (!$("#viewMenu").hidden && !(e.target as Element).closest("#viewMenuWrap")) closeViewMenu();
+});
 $("#connectBtn").addEventListener("click", openConnect);
 $("#emptyConnect").addEventListener("click", openConnect);
 wireCopyButtons($("#connectPop"));
@@ -761,14 +929,15 @@ $("#viewBtn").addEventListener("click", () => {
 $("#viewSheet").addEventListener("click", (e) => {
   const v = (e.target as Element).closest<HTMLElement>("[data-view]")?.dataset.view;
   if (v) setView(v);
-  if (phone.matches && (e.target as Element).closest(".btn") && !(e.target as Element).closest("#deleteBtn,#connectBtn")) closeViewSheet();
+  if (phone.matches && (e.target as Element).closest(".btn,.menu-item") && !(e.target as Element).closest("#deleteBtn,#connectBtn,#viewMenuBtn,#exportBtn")) closeViewSheet();
 });
 document.querySelectorAll<HTMLElement>("[data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode as PickMode)));
 $("#fitBtn").addEventListener("click", fitSelectionOrAll);
 $("#xrayBtn").addEventListener("click", () => setXray(!xray));
+$("#measureBtn").addEventListener("click", () => setMeasuring(!measuring));
+$("#unitBtn").addEventListener("click", cycleUnit);
 $("#treeBtn").addEventListener("click", () => setTreeOpen(!document.body.classList.contains("tree-open")));
 $("#themeBtn").addEventListener("click", () => setTheme(theme === "light" ? "dark" : "light"));
-$("#stlBtn").addEventListener("click", exportStl);
 $("#deleteBtn").addEventListener("click", deleteModel);
 $("#shareBtn").addEventListener("click", () => {
   if (navigator.share) navigator.share({ url: link(), title: state?.name ?? undefined }).catch(() => {});
@@ -788,8 +957,10 @@ addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const del = e.key === "Backspace" || e.key === "Delete";
   if (e.key === "Escape") {
-    if (!$("#connectPop").hidden || document.body.classList.contains("view-open")) closePops();
+    if (!$("#viewMenu").hidden) closeViewMenu(), $("#viewMenuBtn").focus();
+    else if (!$("#connectPop").hidden || document.body.classList.contains("view-open")) closePops();
     else if (selection.length) setSelection([]);
+    else if (measuring) setMeasuring(false);
     else if (xray) setXray(false);
     else if (multi) (multi = false), renderSelBar();
   } else if (del && e.shiftKey) deleteModel();
@@ -798,9 +969,11 @@ addEventListener("keydown", (e) => {
   else if (e.code === "KeyF") fitSelectionOrAll();
   else if (e.code === "KeyG") setMode(mode === "face" ? "feature" : "face");
   else if (e.code === "KeyX") setXray(!xray);
+  else if (e.code === "KeyM") setMeasuring(!measuring);
+  else if (e.code === "KeyU") cycleUnit();
   else if (e.code === "KeyB") setTreeOpen(!document.body.classList.contains("tree-open"));
   else if (e.code === "KeyT") setTheme(theme === "light" ? "dark" : "light");
-  else if (e.code === "KeyE") exportStl();
+  else if (e.code === "KeyE") exportMenu.hidden ? openExportMenu() : closeExportMenu();
   else if (e.key === "Tab") stepFeature(e.shiftKey ? -1 : 1);
   else if (e.key === "=" || e.key === "+") (controls.dollyIn(1.25), controls.update(), (needsRender = true));
   else if (e.key === "-") (controls.dollyOut(1.25), controls.update(), (needsRender = true));
@@ -843,6 +1016,7 @@ function loop(now: number) {
   controls.update();
   if (needsRender) {
     renderer.render(scene, camera);
+    placeDims();
     needsRender = false;
   }
 }

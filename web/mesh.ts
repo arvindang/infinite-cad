@@ -1,4 +1,4 @@
-// Kernel meshes -> three.js bodies laid out for fast highlighting, plus STL export.
+// Kernel meshes -> three.js bodies laid out for fast highlighting.
 import * as THREE from "three";
 import { toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
@@ -16,6 +16,7 @@ export interface Body {
   refs: string[];
   range: { start: number; count: number }[]; // per ref: vertex range in the sorted, non-indexed buffer
   color: THREE.BufferAttribute;
+  source: BodyMesh; // the welded kernel mesh, for exports that want shared vertices
 }
 
 const CREASE = THREE.MathUtils.degToRad(30); // normals: smooth across shallower angles
@@ -60,7 +61,7 @@ export function toBody(m: BodyMesh, material: THREE.Material, edgeMaterial: THRE
   geo.computeBoundsTree();
   const mesh = new THREE.Mesh(geo, material);
   const edges = new THREE.LineSegments(featureEdges(m), edgeMaterial);
-  return { id: m.bodyId, mesh, edges, triRef, refs: m.refs, range, color };
+  return { id: m.bodyId, mesh, edges, triRef, refs: m.refs, range, color, source: m };
 }
 
 /** Lines where faces fold by more than 20°, or where two refs meet (even flush). Manifold meshes are welded, so each edge has exactly two triangles. */
@@ -107,29 +108,4 @@ export function disposeBody(b: Body) {
   b.mesh.geometry.disposeBoundsTree?.();
   b.mesh.geometry.dispose();
   b.edges.geometry.dispose();
-}
-
-/** Binary STL of the given bodies, in mm. */
-export function toStl(bodies: Body[]): Blob {
-  const tris = bodies.reduce((n, b) => n + b.triRef.length, 0);
-  const buf = new ArrayBuffer(84 + tris * 50);
-  const dv = new DataView(buf);
-  const header = "Infinite CAD binary STL, units mm";
-  for (let i = 0; i < header.length; i++) dv.setUint8(i, header.charCodeAt(i));
-  dv.setUint32(80, tris, true);
-  let o = 84;
-  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3();
-  for (const body of bodies) {
-    const p = body.mesh.geometry.attributes.position.array as Float32Array;
-    for (let t = 0; t < body.triRef.length; t++) {
-      a.fromArray(p, t * 9); b.fromArray(p, t * 9 + 3); c.fromArray(p, t * 9 + 6);
-      n.subVectors(c, b).cross(a.clone().sub(b)).normalize();
-      for (const v of [n, a, b, c]) {
-        dv.setFloat32(o, v.x, true); dv.setFloat32(o + 4, v.y, true); dv.setFloat32(o + 8, v.z, true);
-        o += 12;
-      }
-      o += 2; // attribute byte count
-    }
-  }
-  return new Blob([buf], { type: "model/stl" });
 }

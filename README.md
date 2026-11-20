@@ -74,10 +74,12 @@ Viewer (web/) ──► /api/models/:id/...  ──►  CadModel Durable Object 
 | Tab / Shift+Tab | Step through features |
 | B | Features panel |
 | F / Shift+1 | Fit the selection / the whole model |
-| 1–7 | Front, back, left, right, top, bottom, iso |
+| 1–7 | Front, back, left, right, top, bottom, iso (also the View menu) |
 | X | X-ray |
+| M | Measure: every part's X/Y/Z and hole Ø; with a selection, only its dimensions |
+| U | Units for measurements: mm, inches, metres |
 | T | Light / dark |
-| E | Download STL (mm) |
+| E | Export menu, then 1–5: STL, 3MF, STEP (faceted), GLB, OBJ |
 | Shift+⌫ | Delete the model (restorable for 30 days) |
 | + / − | Zoom |
 

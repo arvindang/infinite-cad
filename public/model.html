@@ -11,6 +11,7 @@
 </head>
 <body>
 <canvas id="view" aria-label="3D view of the model. Click a face to select it and copy its link." tabindex="-1"></canvas>
+<div class="dims" id="dims" aria-hidden="true" hidden></div>
 <div class="tip" id="tip" hidden></div>
 
 <header class="bar">
@@ -40,17 +41,30 @@
   <!-- view settings: in the bar on desktop, a sheet above the dock on phones -->
   <div class="view-sheet" id="viewSheet">
     <div class="group views">
-      <button class="btn" data-view="1" title="Front (1) · Back 2 · Left 3">Front <kbd class="k2">1</kbd></button>
-      <button class="btn" data-view="5" title="Top (5) · Bottom 6">Top <kbd class="k2">5</kbd></button>
-      <button class="btn" data-view="4" title="Right (4)">Right <kbd class="k2">4</kbd></button>
-      <button class="btn" data-view="7" title="Isometric (7)">Iso <kbd class="k2">7</kbd></button>
+      <div class="dropdown" id="viewMenuWrap">
+        <button class="btn" id="viewMenuBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewMenu" title="Camera view (1–7)"><span id="viewLabel">View</span> <kbd class="k2">1–7</kbd><svg class="caret" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <div class="menu" id="viewMenu" role="menu" aria-label="Camera view" hidden>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="1">Front <kbd>1</kbd></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="2">Back <kbd>2</kbd></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="3">Left <kbd>3</kbd></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="4">Right <kbd>4</kbd></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="5">Top <kbd>5</kbd></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="6">Bottom <kbd>6</kbd></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="7">Iso <kbd>7</kbd></button>
+        </div>
+      </div>
       <div class="sep"></div>
       <button class="btn" id="fitBtn" title="Frame the selection, or the whole model (F) · Shift+1 fits the model">Fit <kbd>F</kbd></button>
       <button class="btn" id="xrayBtn" aria-pressed="false" title="X-ray: see through the model (X)">X-ray <kbd>X</kbd></button>
+      <button class="btn" id="measureBtn" aria-pressed="false" title="Measure: dimensions of every part, or only of the selection (M)">Measure <kbd>M</kbd></button>
+      <button class="btn" id="unitBtn" title="Units: millimetres, inches or metres (U)" hidden><span id="unitLabel">mm</span> <kbd class="k2">U</kbd></button>
       <button class="btn" id="themeBtn" title="Light or dark (T)" aria-label="Theme"><svg class="not-phone" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg><span class="phone-only">Theme</span> <kbd class="k2">T</kbd></button>
     </div>
     <div class="group">
-      <button class="btn" id="stlBtn" title="Download the model as STL, in mm (E)">STL <kbd>E</kbd></button>
+      <div class="dropdown" id="exportWrap">
+        <button class="btn" id="exportBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="exportMenu" title="Download the model as STL, 3MF, STEP, GLB or OBJ (E)">Export <kbd>E</kbd><svg class="caret" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <div class="menu end" id="exportMenu" role="menu" aria-label="Export format" hidden></div>
+      </div>
       <button class="btn" id="deleteBtn" title="Delete this model (Shift+Backspace). It stays in the trash for 30 days.">Delete <kbd class="k2">⇧⌫</kbd></button>
       <button class="btn primary" id="connectBtn" aria-expanded="false" aria-controls="connectPop">Connect</button>
     </div>

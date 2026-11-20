@@ -32,6 +32,12 @@ code, .id { font-family: var(--mono); font-size: 12px; }
 /* ---------- 3D view ---------- */
 #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
 body.stale #view { filter: saturate(0.35) opacity(0.7); }
+/* measure: labels over the canvas, under the chrome; lines are drawn in the scene */
+.dims { position: fixed; inset: 0; z-index: 5; pointer-events: none; overflow: hidden; }
+.dim {
+  position: absolute; left: 0; top: 0; font: 11px/1 var(--mono); padding: 3px 5px; border-radius: 5px; white-space: nowrap;
+  color: light-dark(#0b7285, #66d9e8); background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid currentColor;
+}
 .tip {
   position: fixed; left: 0; top: 0; z-index: 20; pointer-events: none;
   font: 12px var(--mono); padding: 3px 7px; border-radius: 6px; background: var(--text); color: var(--bg); white-space: nowrap;
@@ -75,6 +81,28 @@ body.stale #view { filter: saturate(0.35) opacity(0.7); }
 .seg { display: flex; align-items: center; gap: 2px; }
 .seg > kbd.hint { margin: 0 4px; cursor: default; }
 .sep { width: 1px; height: 18px; background: var(--line); margin: 0 3px; }
+.dropdown { position: relative; display: flex; }
+.dropdown .caret { color: var(--muted); margin-left: -2px; }
+.btn[aria-expanded="true"] { background: var(--panel-2); }
+.menu {
+  position: absolute; top: calc(100% + 7px); left: -3px; z-index: 20; min-width: 150px; padding: 4px;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+}
+.menu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 28px; padding: 0 6px 0 10px;
+  border: 0; border-radius: 6px; background: transparent; cursor: pointer; text-align: left; white-space: nowrap;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--panel-2); outline: none; }
+.menu.end { left: auto; right: -3px; }
+.menu-item .fmt { display: inline-block; min-width: 4.5ch; font-weight: 600; }
+.menu-item .note { color: var(--muted); }
+.menu-item[aria-checked="true"] { color: var(--accent); }
+.menu-item kbd {
+  display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px;
+  font: 600 11px/1 var(--font); color: var(--muted); background: var(--panel);
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px;
+}
 
 /* ---------- features panel: the part's tree, ids first ---------- */
 .tree-panel {
@@ -207,8 +235,8 @@ body.tree-open .empty { padding-left: calc(var(--tree) + 24px); }
 
 /* ---------- the bar is full: secondary keycaps go first, then labels (tooltips still name every key) ---------- */
 @media (max-width: 1379px) { .bar kbd.k2 { display: none !important; } }
-@media (max-width: 1180px) { .hide-md { display: none !important; } .views [data-view="4"] { display: none; } }
-@media (max-width: 1060px) { .bar kbd { display: none !important; } }
+@media (max-width: 1180px) { .hide-md { display: none !important; } }
+@media (max-width: 1060px) { .bar kbd { display: none !important; } .bar .menu-item kbd { display: inline-grid !important; } }
 @media (min-width: 821px) { .phone-only { display: none !important; } }
 
 /* ---------- phones: identity on top, tools in a dock at the thumb, view settings in a sheet ---------- */
@@ -232,7 +260,12 @@ body.tree-open .empty { padding-left: calc(var(--tree) + 24px); }
   .view-sheet .views { flex: 1 1 100%; }
   .view-sheet .views .sep { display: none; }
   .view-sheet .views .btn { flex: 1; justify-content: center; background: var(--panel-2); }
-  .views [data-view="4"] { display: inline-flex; }
+  .view-sheet .views .dropdown { flex: 1; }
+  .view-sheet .menu { top: auto; bottom: calc(100% + 8px); left: 0; }
+  .view-sheet #exportWrap { position: static; } /* the menu spans the sheet, not the button */
+  .view-sheet .menu.end { left: 0; right: 0; }
+  .menu-item { height: 38px; }
+  .bar .menu-item kbd { display: none !important; }
   .view-sheet .group:last-child { margin-left: auto; }
   .tree-panel { top: auto; left: 8px; right: 8px; width: auto; max-width: 420px; margin: 0 auto; bottom: calc(var(--dock) + 8px); max-height: 42dvh; border-radius: 14px; }
   .row { min-height: 34px; }

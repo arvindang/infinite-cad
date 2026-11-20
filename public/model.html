@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Infinite CAD</title>
+<link rel="icon" href="/favicon.svg">
+<meta name="description" content="A 3D part your LLM builds as a feature tree. Point at any face with a link.">
+<link rel="stylesheet" href="/app.css">
+<link rel="modulepreload" href="/js/viewer.js">
+</head>
+<body>
+<canvas id="view" aria-label="3D view of the model. Click a face to select it and copy its link." tabindex="-1"></canvas>
+<div class="tip" id="tip" hidden></div>
+
+<header class="bar">
+  <div class="group">
+    <a class="brand" href="/" title="All models"><span class="brand-mark">∞</span><span class="hide-md">Infinite CAD</span></a>
+    <div class="sep"></div>
+    <input class="file-name" id="modelName" aria-label="Model name" spellcheck="false">
+    <span class="version" id="version" title="Version">v–</span>
+    <span class="status-dot" id="liveDot" title="Connecting…"></span>
+  </div>
+  <div class="spacer"></div>
+  <div class="group phone-only">
+    <button class="btn" id="shareBtn" title="Share a link to the selection or the model">Share</button>
+  </div>
+  <!-- tools: in the bar on desktop, a dock at the bottom on phones -->
+  <nav class="group tools" id="tools" aria-label="Tools">
+    <button class="btn" id="treeBtn" aria-pressed="false" title="Features: every part, feature and face, with its ref (B)" aria-label="Features"><svg class="phone-only" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h12M8 10h8M8 16h8M4 4v12h2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="not-phone">Features</span> <kbd>B</kbd></button>
+    <div class="sep"></div>
+    <div class="seg" role="group" aria-label="What a click picks">
+      <button class="btn" data-mode="face" aria-pressed="true" title="Click picks a face (G toggles) · Option-click picks its feature">Faces</button>
+      <button class="btn" data-mode="feature" aria-pressed="false" title="Click picks a whole feature (G toggles) · Option-click picks its part">Features</button>
+      <kbd class="hint" title="G toggles Faces and Features">G</kbd>
+    </div>
+    <div class="sep phone-only"></div>
+    <button class="btn phone-only" id="viewBtn" aria-expanded="false" aria-controls="viewSheet">View</button>
+  </nav>
+  <!-- view settings: in the bar on desktop, a sheet above the dock on phones -->
+  <div class="view-sheet" id="viewSheet">
+    <div class="group views">
+      <button class="btn" data-view="1" title="Front (1) · Back 2 · Left 3">Front <kbd class="k2">1</kbd></button>
+      <button class="btn" data-view="5" title="Top (5) · Bottom 6">Top <kbd class="k2">5</kbd></button>
+      <button class="btn" data-view="4" title="Right (4)">Right <kbd class="k2">4</kbd></button>
+      <button class="btn" data-view="7" title="Isometric (7)">Iso <kbd class="k2">7</kbd></button>
+      <div class="sep"></div>
+      <button class="btn" id="fitBtn" title="Frame the selection, or the whole model (F) · Shift+1 fits the model">Fit <kbd>F</kbd></button>
+      <button class="btn" id="xrayBtn" aria-pressed="false" title="X-ray: see through the model (X)">X-ray <kbd>X</kbd></button>
+      <button class="btn" id="themeBtn" title="Light or dark (T)" aria-label="Theme"><svg class="not-phone" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg><span class="phone-only">Theme</span> <kbd class="k2">T</kbd></button>
+    </div>
+    <div class="group">
+      <button class="btn" id="stlBtn" title="Download the model as STL, in mm (E)">STL <kbd>E</kbd></button>
+      <button class="btn" id="deleteBtn" title="Delete this model (Shift+Backspace). It stays in the trash for 30 days.">Delete <kbd class="k2">⇧⌫</kbd></button>
+      <button class="btn primary" id="connectBtn" aria-expanded="false" aria-controls="connectPop">Connect</button>
+    </div>
+  </div>
+</header>
+
+<aside class="tree-panel" id="treePanel" aria-label="Features">
+  <ol class="tree" id="tree"></ol>
+</aside>
+
+<div class="working" id="working" role="status" hidden><span class="pulse"></span><b>Agent is editing</b><span class="task"></span></div>
+<section class="errors" id="errors" role="alert" hidden></section>
+
+<section class="pop" id="connectPop" hidden>
+  <h3>1 · Add the MCP server once</h3>
+  <p>In Claude: Settings → Connectors → Add custom connector. Other clients take the same URL (Streamable HTTP).</p>
+  <div class="field"><input id="mcpUrl" readonly aria-label="MCP server URL"><button class="btn" data-copy="mcpUrl">Copy</button></div>
+  <h3>2 · Point your chat at this model</h3>
+  <p>Paste its link with a task. Face links work too: click a face, then <b id="copyKey">⌘C</b>.</p>
+  <div class="field"><input id="modelUrl" readonly aria-label="Model link"><button class="btn" data-copy="modelUrl">Copy</button></div>
+  <pre class="prompt" id="promptEx"></pre>
+</section>
+
+<div class="empty" id="empty" hidden>
+  <div class="empty-card">
+    <h2>An empty model</h2>
+    <p>Nothing here yet. Connect your LLM, paste this model's link, and ask for a part. It appears here as it's built.</p>
+    <button class="btn primary" id="emptyConnect">Connect an LLM</button>
+  </div>
+</div>
+
+<div class="trashed" id="trashed" hidden>
+  <div class="empty-card">
+    <h2 id="trashedTitle">This model is in the trash</h2>
+    <p id="trashedText"></p>
+    <div class="row"><button class="btn primary" id="restoreBtn">Restore model</button><a class="btn" href="/">All models</a></div>
+  </div>
+</div>
+
+<div class="sel-bar" id="selBar" role="status"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="/js/viewer.js"></script>
+</body>
+</html>

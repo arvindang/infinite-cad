@@ -1,0 +1,29 @@
+{
+  "name": "infinite-cad",
+  "version": "0.1.0",
+  "description": "Infinite CAD — a 3D part canvas that LLMs build on over MCP, with links to exact faces and features",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:web": "esbuild web/viewer.ts web/home.ts web/kernel-worker.ts --bundle --format=esm --target=es2022 --platform=browser --minify --external:node:* --outdir=public/js && cp node_modules/manifold-3d/manifold.wasm public/js/",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc -p . && tsc -p web",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "manifold-3d": "^3.5.5",
+    "three": "^0.187.0",
+    "three-mesh-bvh": "^0.9.18",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261120.1",
+    "@types/three": "^0.187.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.166.0"
+  },
+  "license": "FSL-1.1-ALv2"
+}

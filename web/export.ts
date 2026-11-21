@@ -5,7 +5,7 @@ import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import type { Body } from "./mesh";
 
 export interface ExportFormat {
-  id: "stl" | "3mf" | "step" | "glb" | "obj";
+  id: "stl" | "3mf" | "step" | "dxf" | "glb" | "obj";
   label: string;
   ext: string;
   note: string;
@@ -17,9 +17,10 @@ export const FORMATS: ExportFormat[] = [
   { id: "step", label: "STEP", ext: "step", note: "CAD import · exact solids, mm" },
   { id: "glb", label: "GLB", ext: "glb", note: "Web, AR, Blender · metres, Y up" },
   { id: "obj", label: "OBJ", ext: "obj", note: "Mesh tools · mm" },
+  { id: "dxf", label: "DXF", ext: "dxf", note: "Laser, waterjet, router · flat face outline, mm" },
 ];
 
-export async function exportBodies(fmt: ExportFormat["id"], bodies: Body[], name: string): Promise<Blob> {
+export async function exportBodies(fmt: Exclude<ExportFormat["id"], "dxf">, bodies: Body[], name: string): Promise<Blob> {
   switch (fmt) {
     case "stl": return toStl(bodies);
     case "3mf": return to3mf(bodies);

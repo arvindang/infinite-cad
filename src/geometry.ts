@@ -10,7 +10,7 @@
 import type { Manifold, ManifoldToplevel, Mat4 } from "manifold-3d/manifold";
 import {
   type CadDoc, type Feature, type Issue, type Pattern, type Vec2, type Vec3,
-  defaultOp, formatRef, instanceCount, parseRef, rolesOf, signedArea, validate,
+  defaultOp, formatRef, instanceCount, parseRef, profileAreaCentroid, profileEdgeIndex, profilePolyline, rolesOf, signedArea, validate,
 } from "./schema.ts";
 
 export interface BodyMesh {
@@ -116,17 +116,6 @@ export function zBase(f: Feature): number {
   return 0;
 }
 
-function polygonCentroid(pts: Vec2[]): Vec2 {
-  const a = signedArea(pts);
-  let cx = 0, cy = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % pts.length];
-    const k = x0 * y1 - x1 * y0;
-    cx += (x0 + x1) * k; cy += (y0 + y1) * k;
-  }
-  return [cx / (6 * a), cy / (6 * a)];
-}
-
 /** Frame of a planar role in the feature's local space, or null if not planar. */
 export function localFaceFrame(f: Feature, role: string, holeDepth?: number): M4 | null {
   const z0 = zBase(f);
@@ -145,11 +134,11 @@ export function localFaceFrame(f: Feature, role: string, holeDepth?: number): M4
       if (role === "bottom") return frame([0, 0, z0], [0, 0, -1]);
       return null;
     case "extrude": {
-      const c = polygonCentroid(f.points);
+      const c = profileAreaCentroid(f.points, f.arcs).centroid;
       if (role === "top") return frame([c[0], c[1], z0 + f.height], [0, 0, 1]);
       if (role === "bottom") return frame([c[0], c[1], z0], [0, 0, -1]);
-      const i = rolesOf(f).indexOf(role) - 2;
-      if (i < 0) return null;
+      const i = profileEdgeIndex(f, role);
+      if (i < 0 || f.arcs?.[i]) return null;
       const p0 = f.points[i], p1 = f.points[(i + 1) % f.points.length];
       const d = norm([p1[0] - p0[0], p1[1] - p0[1], 0]);
       const s = Math.sign(signedArea(f.points));
@@ -191,11 +180,13 @@ function distToSegment2(px: number, py: number, a: Vec2, b: Vec2): number {
   const t = Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / l2));
   return Math.hypot(px - a[0] - t * dx, py - a[1] - t * dy);
 }
-function nearestEdge(px: number, py: number, pts: Vec2[]): number {
+/** Profile edge nearest to a point, over the profile's polyline (arcs split into chords). */
+function nearestEdge(px: number, py: number, line: { points: Vec2[]; edgeOf: number[] }): number {
+  const pts = line.points;
   let best = 0, bd = Infinity;
   for (let i = 0; i < pts.length; i++) {
     const d = distToSegment2(px, py, pts[i], pts[(i + 1) % pts.length]);
-    if (d < bd) { bd = d; best = i; }
+    if (d < bd) { bd = d; best = line.edgeOf[i]; }
   }
   return best;
 }
@@ -229,15 +220,17 @@ function primitive(w: ManifoldToplevel, f: Feature, seg: number, holeDepth: numb
         role: (_, n) => (n[2] > 0.999 ? "cap" : n[2] < -0.999 ? "floor" : "wall"),
       };
     case "extrude": {
-      const pts = signedArea(f.points) < 0 ? [...f.points].reverse() : f.points;
+      const line = profilePolyline(f.points, f.arcs, seg);
+      const pts = signedArea(line.points) < 0 ? [...line.points].reverse() : line.points;
       const cs = new CrossSection([pts]);
       const m = Manifold.extrude(cs, f.height).translate([0, 0, z0]);
       cs.delete();
       const roles = rolesOf(f);
-      return { m, role: (c, n) => (Math.abs(n[2]) > 0.999 ? (n[2] > 0 ? "top" : "bottom") : roles[2 + nearestEdge(c[0], c[1], f.points)]) };
+      return { m, role: (c, n) => (Math.abs(n[2]) > 0.999 ? (n[2] > 0 ? "top" : "bottom") : roles[2 + nearestEdge(c[0], c[1], line)]) };
     }
     case "revolve": {
-      const pts = signedArea(f.points) < 0 ? [...f.points].reverse() : f.points;
+      const line = profilePolyline(f.points, f.arcs, seg);
+      const pts = signedArea(line.points) < 0 ? [...line.points].reverse() : line.points;
       const angle = f.angle ?? 360;
       const cs = new CrossSection([pts]);
       const m = Manifold.revolve(cs, seg, angle);
@@ -252,7 +245,7 @@ function primitive(w: ManifoldToplevel, f: Feature, seg: number, holeDepth: numb
             const t: Vec3 = [-Math.sin(th), Math.cos(th), 0];
             if (Math.abs(dot(n, t)) > 0.95) return th < ((angle / 2) * Math.PI) / 180 ? "start" : "end";
           }
-          return roles[nearestEdge(Math.hypot(c[0], c[1]), c[2], f.points)];
+          return roles[nearestEdge(Math.hypot(c[0], c[1]), c[2], line)];
         },
       };
     }

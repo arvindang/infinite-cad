@@ -8,7 +8,7 @@ import { type CadDoc, type Feature, type Issue, type Part, ID_RE, instanceCount,
 
 const KEY_ORDER = [
   "units", "parts", "id", "name", "type", "op", "at", "position", "rotation",
-  "size", "diameter", "diameterTop", "height", "depth", "points", "edges", "angle", "center",
+  "size", "diameter", "diameterTop", "height", "depth", "points", "arcs", "edges", "angle", "center",
   "pattern", "linear", "grid", "circular", "count", "step", "note", "features",
 ];
 const rank = (k: string) => { const i = KEY_ORDER.indexOf(k); return i < 0 ? KEY_ORDER.length : i; };

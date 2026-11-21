@@ -2,9 +2,9 @@
 // Pure functions over BuildResult (typed arrays + source), no WASM: runs wherever the mesh is.
 
 import type { BodyMesh, BuildResult } from "./geometry.ts";
-import { apply, localFaceFrame } from "./geometry.ts";
+import { apply, localFaceFrame, zBase } from "./geometry.ts";
 import type { FactChange, FactsSnapshot } from "./collab.ts";
-import { type CadDoc, type Feature, type Vec3, defaultOp, formatRef, instanceCount, parseRef, planarRoles, rolesOf } from "./schema.ts";
+import { type CadDoc, type Feature, type Vec3, arcOf, defaultOp, formatRef, instanceCount, parseRef, planarRoles, profileEdgeIndex, rolesOf, signedArea } from "./schema.ts";
 
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 const rv = (v: number[]) => v.map(r3) as Vec3;
@@ -135,11 +135,14 @@ function faceSurface(f: Feature, role: string): string {
   if (planarRoles(f).includes(role) || role === "cap") return "plane";
   if (f.type === "cylinder" || f.type === "hole") return f.type === "cylinder" && f.diameterTop != null && f.diameterTop !== f.diameter ? "cone" : "cylinder";
   if (f.type === "sphere") return "sphere";
+  const i = profileEdgeIndex(f, role);
+  if (f.type === "extrude") return i >= 0 && f.arcs?.[i] ? "cylinder" : "plane";
   if (f.type === "revolve") {
-    // A profile edge sweeps a disk/annulus (horizontal), cylinder (vertical) or cone (slanted).
-    const i = rolesOf(f).indexOf(role);
-    if (i < 0 || i >= f.points.length) return "plane"; // start/end caps
-    const a = f.points[i], b = f.points[(i + 1) % f.points.length];
+    if (i < 0) return "plane"; // start/end caps
+    const a = f.points[i], b = f.points[(i + 1) % f.points.length], r = f.arcs?.[i];
+    // An arc sweeps a sphere (centered on the axis) or a torus.
+    if (r) return Math.abs(arcOf(a, b, r, Math.sign(signedArea(f.points)) || 1).center[0]) < 1e-9 ? "sphere" : "torus";
+    // A straight edge sweeps a disk/annulus (horizontal), cylinder (vertical) or cone (slanted).
     return Math.abs(a[1] - b[1]) < 1e-9 ? "plane" : Math.abs(a[0] - b[0]) < 1e-9 ? "cylinder" : "cone";
   }
   return "plane";
@@ -211,6 +214,17 @@ export function resolve(doc: CadDoc, res: BuildResult, facts: FactIndex, refStr:
   } else if (inst && (f.type === "cylinder" || f.type === "hole")) {
     const m = inst.matrix as number[];
     design = { axisOrigin: rv(apply(m, [0, 0, 0])), axis: rv(apply(m, [0, 0, 1], 0)), diameter: f.diameter, depth: inst.holeDepth };
+  } else if (inst && (f.type === "extrude" || f.type === "revolve")) {
+    // An arc edge: its radius, and for an extrude the axis of the cylinder it sweeps.
+    const i = profileEdgeIndex(f, r.role), rad = i >= 0 ? f.arcs?.[i] : null;
+    if (rad) {
+      const a = f.points[i], b = f.points[(i + 1) % f.points.length];
+      const arc = arcOf(a, b, rad, Math.sign(signedArea(f.points)) || 1);
+      const m = inst.matrix as number[];
+      design = f.type === "extrude"
+        ? { axisOrigin: rv(apply(m, [arc.center[0], arc.center[1], zBase(f)])), axis: rv(apply(m, [0, 0, 1], 0)), radius: r3(arc.radius), arcDegrees: r3((arc.sweep * 180) / Math.PI), convex: rad > 0 }
+        : { profileCenter: rv([arc.center[0], 0, arc.center[1]]), radius: r3(arc.radius), arcDegrees: r3((arc.sweep * 180) / Math.PI), convex: rad > 0 };
+    }
   }
   if (!s) {
     return { ref: refStr, kind: "face", exists: false, status: fb.error ? "error" : "consumed", part: fb.partId, feature: f.id, role: r.role, surface, design, dependsOn, dependents, source };

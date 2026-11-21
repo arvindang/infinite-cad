@@ -4,7 +4,8 @@ import Module from "manifold-3d";
 import opencascade from "replicad-opencascadejs";
 import { importSTEP, measureVolume, setOC, type Shape3D } from "replicad";
 import { build } from "../src/geometry.ts";
-import { buildBrep, stepOf } from "../src/brep.ts";
+import { buildBrep, outlineOf, outlinesFor, refPlanes, stepOf } from "../src/brep.ts";
+import { bounds, dxfOf, layoutOutlines, type DxfEntity } from "../src/dxf.ts";
 import type { CadDoc } from "../src/schema.ts";
 
 let passed = 0, failed = 0;
@@ -47,6 +48,15 @@ const doc: CadDoc = {
         { id: "clip", type: "box", size: [100, 100, 8], center: true, position: [0, 0, 5], op: "intersect" },
       ],
     },
+    {
+      id: "plate",
+      features: [
+        { id: "slab", type: "extrude", points: [[-30, -15], [30, -15], [30, 15], [-30, 15]], arcs: [null, 15, null, 15], height: 5 },
+        { id: "slot", type: "extrude", op: "subtract", points: [[-10, -3], [10, -3], [10, 3], [-10, 3]], arcs: [null, 3, null, 3], height: 7, at: "slab.top", position: [0, 0, -6] },
+        { id: "notch", type: "extrude", points: [[-8, 0], [8, 0], [8, 10], [-8, 10]], arcs: [null, null, -8], height: 4, at: "slab.top" },
+      ],
+    },
+    { id: "bead", features: [{ id: "ring", type: "revolve", points: [[5, 0], [10, 0], [10, 6], [5, 6]], arcs: [null, 4] }] },
   ],
 };
 
@@ -55,7 +65,7 @@ check("mesh build is clean", built.ok, built.errors);
 const t0 = Date.now();
 const { parts, dispose } = buildBrep(doc, built);
 const ms = Date.now() - t0;
-check("every part rebuilt", parts.length === 3, parts.map((p) => p.id));
+check("every part rebuilt", parts.length === 5, parts.map((p) => p.id));
 for (const p of parts) {
   const rel = Math.abs(p.volume - p.meshVolume) / p.meshVolume;
   check(`${p.id}: exact volume within 2% of the mesh`, rel < 0.02, { exact: p.volume, mesh: p.meshVolume, rel });
@@ -71,6 +81,7 @@ check("STEP is AP242 in mm", text.includes("AP242") && /SI_UNIT\(\s*\.MILLI\.\s*
 for (const p of parts) check(`STEP names part ${p.id}`, text.includes(`'${p.name}'`));
 check("STEP has analytic surfaces", text.includes("CYLINDRICAL_SURFACE") && text.includes("CONICAL_SURFACE") && text.includes("SPHERICAL_SURFACE"));
 check("STEP is not faceted", !text.includes("POLY_LOOP"));
+check("STEP has arcs as circles and a torus", text.includes("CIRCLE") && text.includes("TOROIDAL_SURFACE"));
 
 const back = (await importSTEP(step)) as Shape3D;
 const total = parts.reduce((s, p) => s + p.volume, 0);
@@ -80,6 +91,46 @@ const kinds: Record<string, number> = {};
 for (const f of back.faces) kinds[f.geomType] = (kinds[f.geomType] ?? 0) + 1;
 check("bore holes come back as cylinders", (kinds.CYLINDRE ?? 0) >= 4 + 1 + 1 + 6, kinds);
 console.log(`  ${parts.length} parts in ${ms} ms, STEP ${(step.size / 1024).toFixed(1)} KB, faces ${JSON.stringify(kinds)}`);
+
+// ---- DXF: flat-face outlines from the exact solids
+const part = (id: string) => parts.find((p) => p.id === id)!;
+const count = (es: DxfEntity[], kind: DxfEntity["kind"]) => es.filter((e) => e.kind === kind).length;
+const radii = (es: DxfEntity[]) => [...new Set(es.flatMap((e) => (e.kind === "arc" || e.kind === "circle" ? [+e.r.toFixed(6)] : [])))].sort((a, b) => a - b);
+const size = (es: DxfEntity[]) => { const b = bounds(es); return [+(b.max[0] - b.min[0]).toFixed(6), +(b.max[1] - b.min[1]).toFixed(6)]; };
+
+const plate = outlineOf(part("plate"))!;
+check("plate: default is its largest flat face (the bottom)", plate.plane.normal[2] < -0.999, plate.plane);
+check("plate: slab and slot come out as 4 lines and 4 true arcs", count(plate.entities, "line") === 4 && count(plate.entities, "arc") === 4 && count(plate.entities, "poly") === 0, plate.entities.map((e) => e.kind));
+check("plate: arc radii 3 and 15", radii(plate.entities).join() === "3,15", radii(plate.entities));
+check("plate: 90 x 30 mm", size(plate.entities).join() === "90,30", size(plate.entities));
+
+const bracket = outlineOf(part("bracket"))!;
+check("bracket: base bottom with the 4 mount holes as circles", count(bracket.entities, "circle") === 4 && radii(bracket.entities).join() === "2.5" && size(bracket.entities).join() === "80,40", { kinds: bracket.entities.map((e) => e.kind), size: size(bracket.entities) });
+
+const faceOf = refPlanes(doc, built);
+const picked = outlinesFor(parts, ["boss.top", "notch.top", "knob"], faceOf);
+check("selected refs pick their faces and parts", picked.map((o) => o.part).join() === "bracket,plate,knob", picked.map((o) => o.part));
+const boss = picked[0];
+check("boss.top: ring of the boss and its bore", count(boss.entities, "circle") === 2 && radii(boss.entities).join() === "4,8" && Math.abs(boss.plane.offset - 16) < 1e-6, { r: radii(boss.entities), plane: boss.plane });
+const notch = picked[1];
+const bite = notch.entities.find((e) => e.kind === "arc") as Extract<DxfEntity, { kind: "arc" }> | undefined;
+const nb = bounds(notch.entities);
+check("notch.top: seen from above, not mirrored (the bite is at +Y)", !!bite && Math.abs(bite.c[1] - nb.max[1]) < 1e-6 && Math.abs(bite.r - 8) < 1e-6, { bite, nb });
+check("a face that isn't flat is skipped for its part's default", outlinesFor(parts, ["cap.surface"], faceOf)[0]?.part === "knob");
+
+const dxf = dxfOf(layoutOutlines([plate, bracket].map((o) => ({ name: o.part, entities: o.entities }))));
+const pairs = dxf.trimEnd().split("\r\n");
+const codes: [string, string][] = [];
+for (let i = 0; i + 1 < pairs.length; i += 2) codes.push([pairs[i].trim(), pairs[i + 1]]);
+const has = (c: string, v: string) => codes.some(([a, b]) => a === c && b === v);
+const after = (name: string) => { const i = codes.findIndex(([a, b]) => a === "9" && b === name); return codes[i + 1]; };
+check("DXF: even group pairs ending in EOF", pairs.length % 2 === 0 && codes.at(-1)?.join() === "0,EOF");
+check("DXF: R12 in millimetres", after("$ACADVER")?.[1] === "AC1009" && after("$INSUNITS")?.join() === "70,4");
+check("DXF: one layer per part, every entity on a declared layer", has("2", "plate") && has("2", "bracket") && codes.filter(([a]) => a === "8").every(([, b]) => b === "plate" || b === "bracket"));
+check("DXF: arcs and circles, no polylines", codes.filter(([a, b]) => a === "0" && b === "ARC").length === 4 && codes.filter(([a, b]) => a === "0" && b === "CIRCLE").length === 4 && !has("0", "POLYLINE"));
+const xs = codes.filter(([a]) => a === "10").map(([, b]) => Number(b));
+check("DXF: parts laid out side by side from the origin", Math.min(...xs) >= -1e-9 && Math.max(...xs) > 90 + 10, { min: Math.min(...xs), max: Math.max(...xs) });
+console.log(`  DXF ${(dxf.length / 1024).toFixed(1)} KB, ${codes.filter(([a]) => a === "0").length - 1} records`);
 dispose();
 
 console.log(`\n${passed} passed, ${failed} failed`);

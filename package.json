@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build:web": "esbuild web/viewer.ts web/home.ts web/kernel-worker.ts web/step-worker.ts --bundle --format=esm --target=es2022 --platform=browser --minify --external:node:* --outdir=public/js && cp node_modules/manifold-3d/manifold.wasm node_modules/replicad-opencascadejs/dist/replicad_single.wasm public/js/",
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --host localhost:8787",
     "deploy": "wrangler deploy",
     "typecheck": "tsc -p . && tsc -p web",
     "smoke": "node scripts/smoke.mjs",

@@ -17,7 +17,7 @@ Live: https://infinitecad.app · MCP at `https://infinitecad.app/mcp` (the origi
 1. In Claude: **Settings → Connectors → Add custom connector** → `https://infinitecad.app/mcp`. In Claude Code: `claude mcp add --transport http infinite-cad https://infinitecad.app/mcp`.
 2. Ask for a part: "Make an 80×40×6 mm wall bracket with two M4 mounting holes and a 16 mm boss." The agent returns a link; open it and watch the model build.
 3. Click a face, press ⌘C, and paste the link back with what to change: "…#base.top put two more holes here, 20 mm apart." The agent resolves the link and edits just that feature.
-4. Export STL or 3MF to print, or STEP (exact solids) to keep going in your CAD tool.
+4. Export STL or 3MF to print, STEP (exact solids) to keep going in your CAD tool or CAM, or DXF (flat outlines with true arcs) for a laser, waterjet or router.
 
 ## Run it
 
@@ -51,7 +51,7 @@ Viewer (web/) ──► /api/models/:id/...  ──►  CadModel Durable Object 
   Web Worker
 ```
 
-- **The tree.** `{"units":"mm","parts":[{"id","features":[…]}]}`. Each part is one solid built from an ordered list of features: `box`, `cylinder`, `sphere`, `extrude`, `revolve`, `hole`, combined with `op` (union, subtract, intersect), placed with `position`/`rotation` or `at` an earlier flat face (`"at": "base.top"`), and repeated with `pattern`. Full schema in `schemaDoc()` (src/schema.ts), which is also what the agent reads.
+- **The tree.** `{"units":"mm","parts":[{"id","features":[…]}]}`. Each part is one solid built from an ordered list of features: `box`, `cylinder`, `sphere`, `extrude`, `revolve` (profile edges can be arcs: `arcs`), `hole`, combined with `op` (union, subtract, intersect), placed with `position`/`rotation` or `at` an earlier flat face (`"at": "base.top"`), and repeated with `pattern`. Full schema in `schemaDoc()` (src/schema.ts), which is also what the agent reads.
 - **Refs.** `part`, `feature`, `feature:n` (pattern instance), `feature.role` (a face), `feature:n.role`. Roles come from the primitive (`top`, `front`, `wall`, `side-3`, …) and survive booleans: every triangle carries its ref through manifold.
 - **One Durable Object per model** holds the tree, every version, aliases, the claim, comment threads and the notes. `start_edit` claims the model for 10 minutes and the viewer shows the task and highlights the refs being changed. `edit_features` / `write_model` with the lock finish it. `base_version` rejects stale writes and says what changed.
 - **Scoped edits.** `edit_features` takes ops (`update` as a JSON merge patch, `replace`, `add`, `add_part`, `remove`, `rename`), applies them to the current tree, validates the result once, and saves all or nothing. Everything not named stays byte-identical.
@@ -92,7 +92,7 @@ Viewer (web/) ──► /api/models/:id/...  ──►  CadModel Durable Object 
 | M | Measure: every part's X/Y/Z and hole Ø; with a selection, only its dimensions |
 | U | Units for measurements: mm, inches, metres |
 | T | Light / dark |
-| E | Export menu, then 1–5: STL, 3MF, STEP (exact solids), GLB, OBJ |
+| E | Export menu, then 1–6: STL, 3MF, STEP (exact solids), GLB, OBJ, DXF (flat outline of the selected face or part, else every part) |
 | Shift+⌫ | Delete the model (restorable for 30 days) |
 | + / − | Zoom |
 | C | Comment mode; with a selection, comment on it; again to leave comment mode |

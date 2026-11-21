@@ -7,7 +7,7 @@ Infinite CAD is a 3D part canvas that LLMs build on over MCP: the agent writes a
 ## Commands
 
 ```sh
-npm run dev         # wrangler dev on :8787 (also runs build:web and watches src/ and web/)
+npm run dev         # wrangler dev on :8787 (also runs build:web and watches src/ and web/); --host keeps links on localhost, since wrangler dev otherwise rewrites request.url to the first custom domain
 npm run smoke       # in a second terminal: end-to-end MCP run against :8787 (pass a base URL to target another host)
 npm run typecheck   # tsc for the worker (src/) and the viewer (web/), separate tsconfigs
 npm run build:web   # esbuild web/viewer.ts, web/home.ts, web/kernel-worker.ts -> public/js (+ manifold.wasm; gitignored)
@@ -27,7 +27,7 @@ There is no unit test suite. Verification is `typecheck` plus `smoke` (scripts/s
 - **src/ids.ts**: model ids are 14 random a-z0-9 chars and are the only access control (capability URLs, no auth yet); locks are 20, thread and comment ids 10. Feature and part ids are agent-chosen slugs. `parseLink()` accepts full links, bare ids, `?v=<n>`, `?c=<thread>` and `#ref,ref` fragments, and ignores other query params.
 - **src/analytics.ts** writes Workers Analytics Engine events (`tool`, `connect`, `create`, `session`, `trash`, `comment`, `notes`, `history`). Model ids are hashed, and trees, feature ids, refs, comment text and notes are never recorded; keep it that way.
 - **web/** is the viewer client (plain TS + three.js, no framework), bundled to `public/js`; the kernel runs in a Web Worker (web/kernel-worker.ts) on the same src/geometry.ts.
-- **Export** is client-side. web/export.ts writes STL, 3MF, GLB, OBJ and a faceted STEP fallback from the meshes. Exact STEP is src/brep.ts in web/step-worker.ts: OpenCascade (replicad, ~23 MB WASM served as a static asset, fetched only on the first STEP export) rebuilds each feature instance as an analytic solid using the matrices and hole depths the manifold build resolved, so any change to `primitive()` in src/geometry.ts needs the same change in src/brep.ts. Keep OpenCascade out of the Worker bundle.
+- **Export** is client-side. web/export.ts writes STL, 3MF, GLB, OBJ and a faceted STEP fallback from the meshes. Exact STEP and DXF are src/brep.ts in web/step-worker.ts (DXF: `outlineOf()` takes a flat face of the exact solid, edges stay lines, arcs and circles, src/dxf.ts writes R12 in mm, one layer per part; the selected flat face or part picks what to outline, else each part's largest flat face): OpenCascade (replicad, ~23 MB WASM served as a static asset, fetched only on the first STEP export) rebuilds each feature instance as an analytic solid using the matrices and hole depths the manifold build resolved, so any change to `primitive()` in src/geometry.ts needs the same change in src/brep.ts. Keep OpenCascade out of the Worker bundle.
 
 ## Conventions and constraints
 

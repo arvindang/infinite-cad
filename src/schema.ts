@@ -40,10 +40,10 @@ export interface CylinderFeature extends FeatureBase {
 }
 export interface SphereFeature extends FeatureBase { type: "sphere"; diameter: number }
 export interface ExtrudeFeature extends FeatureBase {
-  type: "extrude"; points: Vec2[]; height: number; edges?: (string | null)[]; center?: boolean;
+  type: "extrude"; points: Vec2[]; height: number; edges?: (string | null)[]; arcs?: (number | null)[]; center?: boolean;
 }
 export interface RevolveFeature extends FeatureBase {
-  type: "revolve"; points: Vec2[]; angle?: number; edges?: (string | null)[];
+  type: "revolve"; points: Vec2[]; angle?: number; edges?: (string | null)[]; arcs?: (number | null)[];
 }
 export interface HoleFeature extends FeatureBase {
   type: "hole"; diameter: number; depth?: number;
@@ -69,6 +69,7 @@ Types and face roles:
 - sphere {diameter}: surface
 - extrude {points:[[x,y],...], height, edges?:[names]}: top bottom, edge i (points[i]->points[i+1]) is edges[i] or side-<i+1>
 - revolve {points:[[r,z],...], angle?}: profile edge i is edges[i] or face-<i+1>; start end if angle<360
+  arcs?:[r|null] (extrude, revolve): edge i is an arc of radius |r|, r>0 bulges out, r<0 curves in, |r| >= half its length
 - hole {diameter, depth?} (no depth = through): wall floor
 Placement: +Z up, mm. A primitive's origin is the center of its bottom face (sphere: center); center:true centers it on Z. position:[x,y,z], rotation:[x,y,z] degrees.
 "at":"<feature>.<role>" puts position/rotation/pattern in that flat face's frame: origin at the face center, +Z out of the solid (into the void for a cut), X along the target feature's X for top/bottom. Only earlier features in the same part.
@@ -131,13 +132,19 @@ export function rolesOf(f: Feature): string[] {
   }
 }
 
+/** Index of the profile edge a role names, or -1 for caps and non-profile roles. */
+export function profileEdgeIndex(f: Feature, role: string): number {
+  if (f.type !== "extrude" && f.type !== "revolve") return -1;
+  return profileRoles(f, f.type === "extrude" ? "side" : "face").indexOf(role);
+}
+
 /** Roles that are flat and have a placement frame (usable in `at`). */
 export function planarRoles(f: Feature): string[] {
   switch (f.type) {
     case "box": return BOX_ROLES;
     case "cylinder": return rolesOf(f).filter((r) => r !== "side");
     case "sphere": return [];
-    case "extrude": return rolesOf(f);
+    case "extrude": return rolesOf(f).filter((r) => !f.arcs?.[profileEdgeIndex(f, r)]);
     case "revolve": return [];
     case "hole": return f.depth == null ? [] : ["floor"];
   }
@@ -267,6 +274,24 @@ export function validate(doc: CadDoc): Issue[] {
             if (f.points.some((p) => p[0] < 0)) add(`${fp}.points`, "bad_param", `${label}: revolve profile must have x >= 0 (x is the radius, y the height)`);
             if (f.angle != null && (!isNum(f.angle) || f.angle <= 0 || f.angle > 360)) add(`${fp}.angle`, "bad_param", `${label}: angle must be in (0, 360]`);
           }
+          if (f.arcs != null) {
+            if (!Array.isArray(f.arcs) || f.arcs.length > f.points.length) {
+              add(`${fp}.arcs`, "bad_param", `${label}: arcs gives edge i (points[i] -> points[i+1]) a radius; at most ${f.points.length} entries`);
+            } else {
+              f.arcs.forEach((r, k) => {
+                if (r == null) return;
+                const a = f.points[k], b = f.points[(k + 1) % f.points.length];
+                const chord = Math.hypot(b[0] - a[0], b[1] - a[1]);
+                if (!isNum(r) || r === 0) add(`${fp}.arcs[${k}]`, "bad_param", `${label}: arcs[${k}] must be a radius (> 0 bulges out, < 0 curves in) or null for a straight edge`);
+                else if (chord < 1e-9) add(`${fp}.arcs[${k}]`, "bad_param", `${label}: arcs[${k}]: edge ${k} has zero length`);
+                else if (Math.abs(r) < chord / 2 - 1e-6) add(`${fp}.arcs[${k}]`, "bad_param", `${label}: arcs[${k}]: radius ${Math.abs(r)} is too small for an edge ${+chord.toFixed(4)} long (at least ${+(chord / 2).toFixed(4)}, a half circle)`);
+              });
+              if (f.type === "revolve" && !issues.some((x) => x.path.startsWith(`${fp}.arcs`))
+                && profilePolyline(f.points, f.arcs, 96).points.some((p) => p[0] < -1e-6)) {
+                add(`${fp}.arcs`, "bad_param", `${label}: an arc crosses the axis (x < 0); revolve profiles must stay at x >= 0`);
+              }
+            }
+          }
           if (f.edges != null) {
             if (!Array.isArray(f.edges) || f.edges.length > f.points.length) {
               add(`${fp}.edges`, "bad_param", `${label}: edges names edge i (points[i] -> points[i+1]); at most ${f.points.length} entries`);
@@ -349,6 +374,83 @@ function validateAt(
   const n = instanceCount(target.f.pattern);
   if (n > 1 && r.instance == null) add(`${fp}.at`, "ambiguous_ref", `${label}: "${r.id}" has ${n} instances; use "${r.id}:1.${r.role}" … "${r.id}:${n}.${r.role}"`);
   if (r.instance != null && r.instance > n) add(`${fp}.at`, "unknown_ref", `${label}: "${r.id}" has ${n} instance(s), not ${r.instance}`);
+}
+
+// ---------- profiles with arcs ----------
+
+export interface ArcInfo {
+  center: Vec2;
+  mid: Vec2; // point halfway along the arc
+  radius: number;
+  sweep: number; // radians, (0, π]
+  dir: 1 | -1; // 1 = counter-clockwise from a to b
+}
+
+/**
+ * Edge a -> b as an arc of signed radius r: r > 0 bulges away from the profile's inside, r < 0
+ * curves into it. Always the shorter arc (at most a half circle). `inside` is the sign of the
+ * straight-edge profile's signed area (1 = counter-clockwise).
+ */
+export function arcOf(a: Vec2, b: Vec2, r: number, inside: number): ArcInfo {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const c = Math.hypot(dx, dy), R = Math.abs(r);
+  const h = Math.sqrt(Math.max(0, R * R - (c * c) / 4));
+  const k = (inside >= 0 ? 1 : -1) * (r > 0 ? 1 : -1); // +1: center toward the inside
+  const nx = (-dy / c) * k, ny = (dx / c) * k; // unit normal toward the center
+  const m: Vec2 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const center: Vec2 = [m[0] + nx * h, m[1] + ny * h];
+  const mid: Vec2 = [m[0] - nx * (R - h), m[1] - ny * (R - h)];
+  const sweep = 2 * Math.asin(Math.min(1, c / (2 * R)));
+  const cr = (a[0] - center[0]) * (mid[1] - center[1]) - (a[1] - center[1]) * (mid[0] - center[0]);
+  return { center, mid, radius: R, sweep, dir: cr >= 0 ? 1 : -1 };
+}
+
+/** The profile as a polyline (arcs split into chords) and, per polyline segment, its edge index. */
+export function profilePolyline(points: Vec2[], arcs: (number | null)[] | undefined, circleSegments: number): { points: Vec2[]; edgeOf: number[] } {
+  const out: Vec2[] = [], edgeOf: number[] = [];
+  const inside = Math.sign(signedArea(points)) || 1;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i], b = points[(i + 1) % points.length], r = arcs?.[i];
+    out.push(a); edgeOf.push(i);
+    if (!r) continue;
+    const arc = arcOf(a, b, r, inside);
+    const n = Math.max(2, Math.ceil((circleSegments * arc.sweep) / (2 * Math.PI)));
+    const a0 = Math.atan2(a[1] - arc.center[1], a[0] - arc.center[0]);
+    for (let j = 1; j < n; j++) {
+      const t = a0 + arc.dir * arc.sweep * (j / n);
+      out.push([arc.center[0] + arc.radius * Math.cos(t), arc.center[1] + arc.radius * Math.sin(t)]);
+      edgeOf.push(i);
+    }
+  }
+  return { points: out, edgeOf };
+}
+
+/** Exact area and centroid of a profile with arcs (straight polygon plus or minus circular segments). */
+export function profileAreaCentroid(points: Vec2[], arcs?: (number | null)[]): { area: number; centroid: Vec2 } {
+  const a = signedArea(points), s = Math.sign(a) || 1;
+  let A = Math.abs(a), cx = 0, cy = 0;
+  for (let i = 0; i < points.length; i++) {
+    const [x0, y0] = points[i], [x1, y1] = points[(i + 1) % points.length];
+    const k = x0 * y1 - x1 * y0;
+    cx += (x0 + x1) * k; cy += (y0 + y1) * k;
+  }
+  cx /= 6 * a; cy /= 6 * a;
+  let mx = cx * A, my = cy * A;
+  arcs?.forEach((r, i) => {
+    if (!r) return;
+    const p = points[i], q = points[(i + 1) % points.length];
+    const arc = arcOf(p, q, r, s);
+    const th = arc.sweep, R = arc.radius;
+    const segA = ((R * R) / 2) * (th - Math.sin(th));
+    if (segA <= 0) return;
+    const d = (4 * R * Math.sin(th / 2) ** 3) / (3 * (th - Math.sin(th)));
+    const ux = arc.mid[0] - arc.center[0], uy = arc.mid[1] - arc.center[1];
+    const ul = Math.hypot(ux, uy) || 1;
+    const gx = arc.center[0] + (ux / ul) * d, gy = arc.center[1] + (uy / ul) * d;
+    const sign = r > 0 ? 1 : -1;
+    A += sign * segA; mx += sign * segA * gx; my += sign * segA * gy;
+  });
+  return { area: A, centroid: [mx / A, my / A] };
 }
 
 export function signedArea(pts: Vec2[]): number {

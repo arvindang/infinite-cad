@@ -248,6 +248,49 @@ check("circular pattern instance", E("grips:8.left").exists);
 const empty = build(w, { parts: [{ id: "nothing", features: [{ id: "a", type: "box", size: [10, 10, 10] }, { id: "b", type: "box", size: [5, 5, 5], op: "intersect", position: [50, 0, 0] }] }] });
 check("empty part reported", !empty.ok && /is empty/.test(empty.errors[0]?.message ?? ""), empty.errors);
 
+// ---------------------------------------------------------------- arcs
+section("arcs");
+const arcDoc: CadDoc = {
+  parts: [
+    {
+      id: "plate",
+      features: [
+        { id: "slot", type: "extrude", height: 4, points: [[-15, -5], [15, -5], [15, 5], [-15, 5]], arcs: [null, 5, null, 5] },
+        { id: "pin", type: "cylinder", diameter: 2, height: 3, at: "slot.top" },
+        { id: "tab", type: "box", size: [2, 2, 2], at: "slot.side-1" },
+      ],
+    },
+    { id: "dee", features: [{ id: "d", type: "extrude", height: 2, points: [[0, -10], [10, -10], [10, 10], [0, 10]], arcs: [null, null, null, 10] }] },
+    { id: "bite", features: [{ id: "b", type: "extrude", height: 1, points: [[0, 0], [20, 0], [20, 20], [0, 20]], arcs: [-10] }] },
+    { id: "dome", features: [{ id: "cap", type: "revolve", points: [[0, 0], [10, 0], [0, 10]], arcs: [null, 10] }] },
+    { id: "bead", features: [{ id: "ring", type: "revolve", points: [[5, 0], [10, 0], [10, 6], [5, 6]], arcs: [null, 4] }] },
+  ],
+};
+check("arc doc validates", validate(arcDoc).length === 0, validate(arcDoc));
+const ab = build(w, arcDoc);
+check("arc doc builds", ab.ok, ab.errors);
+const af = indexFacts(ab);
+const A = (ref: string) => resolve(arcDoc, ab, af, ref) as Record<string, any>;
+const near = (got: number, want: number, rel = 0.005) => Math.abs(got - want) / want < rel;
+check("slot volume (rect + two half circles)", near(ab.parts.plate.volume, (300 + Math.PI * 25) * 4 + Math.PI * 3 + 8, 0.005), ab.parts.plate.volume);
+check("arc side is a cylinder with its axis", A("slot.side-2").surface === "cylinder" && A("slot.side-2").design?.radius === 5 && A("slot.side-2").design?.axisOrigin.join() === "15,0,0" && A("slot.side-2").design?.arcDegrees === 180, A("slot.side-2"));
+check("straight side stays planar", A("slot.side-1").surface === "plane" && A("slot.side-1").normal?.join() === "0,-1,0");
+check("arc side tagged on the mesh", A("slot.side-4").exists && A("slot.side-4").triangles > 2);
+check("dee volume", near(ab.parts.dee.volume, (200 + 50 * Math.PI) * 2), ab.parts.dee.volume);
+const deeX = (1000 - 50 * Math.PI * (40 / (3 * Math.PI))) / (200 + 50 * Math.PI);
+check("top frame at the exact centroid", Math.abs(A("d.top").design?.origin[0] - deeX) < 1e-3, { got: A("d.top").design?.origin, want: deeX });
+check("concave arc bites in", near(ab.parts.bite.volume, 400 - 50 * Math.PI), ab.parts.bite.volume);
+check("concave arc is not convex", A("b.side-1").design?.convex === false);
+check("revolved arc on the axis is a sphere", A("cap.face-2").surface === "sphere" && near(ab.parts.dome.volume, (2 / 3) * Math.PI * 1000, 0.01), ab.parts.dome.volume);
+check("revolved arc off the axis is a torus", A("ring.face-2").surface === "torus");
+const arcIssues = (f: Record<string, unknown>) => validate({ parts: [{ id: "p", features: [f as any] }] }).map((i) => i.path);
+check("arc can't be on an at face", validate({ parts: [{ id: "p", features: [arcDoc.parts[0].features[0], { id: "x", type: "box", size: [1, 1, 1], at: "slot.side-2" }] }] }).some((i) => i.code === "not_planar"));
+check("arc radius too small rejected", arcIssues({ id: "s", type: "extrude", height: 1, points: [[0, 0], [10, 0], [10, 10]], arcs: [4] }).includes("parts[0].features[0].arcs[0]"));
+check("arc radius must be a number", arcIssues({ id: "s", type: "extrude", height: 1, points: [[0, 0], [10, 0], [10, 10]], arcs: [0] }).includes("parts[0].features[0].arcs[0]"));
+check("too many arcs rejected", arcIssues({ id: "s", type: "extrude", height: 1, points: [[0, 0], [10, 0], [10, 10]], arcs: [null, null, null, 5] }).includes("parts[0].features[0].arcs"));
+check("revolve arc across the axis rejected", arcIssues({ id: "s", type: "revolve", points: [[0, 0], [10, 0], [10, 10], [0, 10]], arcs: [null, null, null, 5] }).includes("parts[0].features[0].arcs"));
+check("arcs sort right after points", canonical(arcDoc.parts[1]).includes('"points":[[0,-10],[10,-10],[10,10],[0,10]],"arcs"'), canonical(arcDoc.parts[1]));
+
 // ---------------------------------------------------------------- perf
 section("perf");
 for (const [nx, ny] of [[4, 4], [10, 10], [15, 15]]) {

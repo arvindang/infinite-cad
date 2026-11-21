@@ -885,13 +885,13 @@ function closeExportMenu() {
   exportMenu.hidden = true;
   $("#exportBtn").setAttribute("aria-expanded", "false");
 }
-// Exact STEP runs OpenCascade in its own worker, fetched the first time someone asks for STEP.
+// Exact STEP and DXF run OpenCascade in their own worker, fetched the first time someone asks for one.
 let stepWorker: Worker | null = null;
 let stepSeq = 0;
 const stepWaiting = new Map<number, (r: StepReply) => void>();
-function stepRequest(tree: CadDoc): Promise<StepReply> {
+function stepRequest(req: Omit<StepRequest, "seq">): Promise<StepReply> {
   if (!stepWorker) {
-    toast("Loading the CAD kernel for STEP (about 7 MB, first time only)…", 6000);
+    toast(`Loading the CAD kernel for ${req.format.toUpperCase()} (about 7 MB, first time only)…`, 6000);
     stepWorker = new Worker("/js/step-worker.js", { type: "module" });
     stepWorker.onmessage = (e: MessageEvent<StepReply>) => {
       stepWaiting.get(e.data.seq)?.(e.data);
@@ -907,15 +907,21 @@ function stepRequest(tree: CadDoc): Promise<StepReply> {
   const seq = ++stepSeq;
   return new Promise((done) => {
     stepWaiting.set(seq, done);
-    stepWorker!.postMessage({ seq, doc: tree } satisfies StepRequest);
+    stepWorker!.postMessage({ seq, ...req } satisfies StepRequest);
   });
 }
 /** Exact B-rep STEP; falls back to the faceted one (and says so) if OpenCascade can't do it. */
 async function exactStep(tree: CadDoc, title: string): Promise<{ blob: Blob; note?: string }> {
-  const r = await stepRequest(tree);
-  if ("step" in r) return { blob: new Blob([r.step], { type: "model/step" }) };
+  const r = await stepRequest({ doc: tree, format: "step" });
+  if ("file" in r) return { blob: new Blob([r.file], { type: "model/step" }) };
   console.warn("exact STEP failed:", r.error);
   return { blob: await exportBodies("step", bodies, title), note: `faceted: exact STEP failed (${r.error})` };
+}
+/** DXF of flat-face outlines from the exact solid: the selected flat faces or parts, else every part. */
+async function exactDxf(tree: CadDoc): Promise<{ blob: Blob; note?: string }> {
+  const r = await stepRequest({ doc: tree, format: "dxf", select: selection });
+  if ("error" in r) throw new Error(r.error);
+  return { blob: new Blob([r.file], { type: "image/vnd.dxf" }), note: r.note };
 }
 async function exportAs(id: ExportFormat["id"]) {
   closeExportMenu();
@@ -927,10 +933,12 @@ async function exportAs(id: ExportFormat["id"]) {
   let blob: Blob, note: string | undefined;
   try {
     if (id === "step") ({ blob, note } = await exactStep(doc, title));
+    else if (id === "dxf") ({ blob, note } = await exactDxf(doc));
     else blob = await exportBodies(id, bodies, title);
   } catch (err) {
     console.error(err);
-    return void toast(`Couldn't export ${f.label}. Try again.`);
+    const why = id === "dxf" && err instanceof Error ? ` (${escapeHtml(err.message)})` : "";
+    return void toast(`Couldn't export ${f.label}${why}. Try again.`);
   }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

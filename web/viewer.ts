@@ -6,6 +6,7 @@ import { type Body, disposeBody, toBody } from "./mesh";
 import { type ExportFormat, FORMATS, exportBodies } from "./export";
 import { type Dim, DimLayer, type Unit, UNITS, boxDims, faceDims } from "./measure";
 import type { BuildReply, BuildRequest } from "./kernel-worker";
+import type { StepReply, StepRequest } from "./step-worker";
 import { parseRef, type CadDoc, type Ref } from "../src/schema.ts";
 import { $, MOD, copy, escapeHtml, prefs, rememberModel, toast, viewerId, wireCopyButtons } from "./shared";
 
@@ -177,8 +178,6 @@ function repaint(refs: Iterable<string>) {
 }
 
 // ---------- selection ----------
-type PickMode = "face" | "feature";
-let mode: PickMode = "face";
 function setSelection(keys: string[], opts: { fit?: boolean; hash?: boolean } = {}) {
   selection = [...new Set(keys)];
   const prev = selectedRefs;
@@ -216,12 +215,6 @@ function setHover(key: string | null) {
   document.querySelectorAll(".tree .row.hover").forEach((n) => n.classList.remove("hover"));
   if (key) document.querySelector(`.tree [data-key="${CSS.escape(key)}"]`)?.classList.add("hover");
 }
-function setMode(m: PickMode) {
-  mode = m;
-  document.querySelectorAll<HTMLElement>("[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
-  renderSelBar();
-}
-
 // ---------- picking ----------
 const raycaster = new THREE.Raycaster();
 raycaster.firstHitOnly = true;
@@ -237,11 +230,9 @@ function pickAt(x: number, y: number): string | null {
   // non-indexed positions are (vertex / 3 = triangle).
   return b.refs[b.triRef[Math.floor(hit.face.a / 3)]];
 }
-/** Faces mode picks the face, Features mode its instance or feature; Option goes one level up. */
+/** A click picks the face; Option picks the level around it (its instance or feature). */
 function keyFor(ref: string, up: boolean): string {
-  const chain = [ref];
-  for (let k = parent(ref); k; k = parent(k)) chain.push(k);
-  return chain[Math.min((mode === "feature" ? 1 : 0) + (up ? 1 : 0), chain.length - 1)];
+  return (up && parent(ref)) || ref;
 }
 const tip = $("#tip");
 let lastMove: { x: number; y: number; alt: boolean } | null = null;
@@ -514,7 +505,7 @@ function renderTree() {
           : roles();
         return `<li class="feat ${openFeatures.has(f.id) ? "open" : ""}" data-feature="${f.id}">
           <button class="row ${errored.has(f.id) ? "err" : ""} ${refs.length ? "" : "absent"}" data-key="${f.id}" title="${escapeHtml(f.note ?? "")}">
-            <span class="caret" data-act="toggle" aria-label="Show faces">${kids ? "▸" : ""}</span><span class="id">${f.id}</span><span class="op">${f.type}${f.pattern ? ` ×${instances.length || "?"}` : ""}</span>
+            <span class="caret" data-act="toggle" aria-label="Show faces">${kids ? `<svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M6.5 4 11.5 9 6.5 14" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/></svg>` : ""}</span><span class="id">${f.id}</span><span class="op">${f.type}${f.pattern ? ` ×${instances.length || "?"}` : ""}</span>
           </button><ol>${kids}</ol></li>`;
       }).join("")}</ol>
     </li>`).join("");
@@ -537,6 +528,7 @@ function markTree() {
     }
   }
   treeEl.querySelector(".row.on")?.scrollIntoView({ block: "nearest" });
+  syncTreeAll();
 }
 treeEl.addEventListener("click", (e) => {
   const t = e.target as Element;
@@ -545,6 +537,7 @@ treeEl.addEventListener("click", (e) => {
     li.classList.toggle("open");
     const id = li.dataset.feature!;
     li.classList.contains("open") ? openFeatures.add(id) : openFeatures.delete(id);
+    syncTreeAll();
     return;
   }
   const key = t.closest<HTMLElement>("[data-key]")?.dataset.key;
@@ -558,6 +551,25 @@ treeEl.addEventListener("dblclick", (e) => {
 });
 treeEl.addEventListener("pointerover", (e) => setHover((e.target as Element).closest<HTMLElement>("[data-key]")?.dataset.key ?? null));
 treeEl.addEventListener("pointerleave", () => setHover(null));
+/** Shift+B: expand every feature's faces, or collapse them all when all are already open. */
+function toggleAllFeatures() {
+  const feats = [...treeEl.querySelectorAll<HTMLElement>(".feat")].filter((li) => li.querySelector("[data-act=toggle] svg"));
+  const open = feats.some((li) => !li.classList.contains("open"));
+  for (const li of feats) {
+    li.classList.toggle("open", open);
+    open ? openFeatures.add(li.dataset.feature!) : openFeatures.delete(li.dataset.feature!);
+  }
+  if (open) setTreeOpen(true);
+  syncTreeAll();
+}
+function syncTreeAll() {
+  const feats = [...treeEl.querySelectorAll<HTMLElement>(".feat")].filter((li) => li.querySelector("[data-act=toggle] svg"));
+  const allOpen = feats.length > 0 && feats.every((li) => li.classList.contains("open"));
+  $("#treeAllLabel").textContent = allOpen ? "Collapse all" : "Expand all";
+  ($("#treeAllBtn") as HTMLButtonElement).disabled = !feats.length;
+}
+$("#treeAllBtn").addEventListener("click", toggleAllFeatures);
+
 function setTreeOpen(on: boolean) {
   if (on && phone.matches) closeViewSheet();
   document.body.classList.toggle("tree-open", on);
@@ -587,16 +599,15 @@ function renderSelBar() {
       </div>`;
     return;
   }
-  const what = mode === "face" ? "face" : "feature";
   bar.innerHTML = measuring && doc.parts.length && !(building && firstBuild)
-    ? `<span class="hint">Measuring every part · <b>${coarse.matches ? "Tap" : "Click"}</b> a ${what} to measure only it${coarse.matches ? "" : ` · <kbd>U</kbd> ${unit}`}</span>`
+    ? `<span class="hint">Measuring every part · <b>${coarse.matches ? "Tap" : "Click"}</b> a face to measure only it${coarse.matches ? "" : ` · <kbd>U</kbd> ${unit}`}</span>`
     : building && firstBuild
     ? `<span class="hint"><span class="pulse"></span> Building…</span>`
     : !doc.parts.length
       ? `<span class="hint">Nothing to select yet</span>`
       : coarse.matches
-        ? `<span class="hint"><b>Tap</b> a ${what} to select it</span>`
-        : `<span class="hint"><b>Click</b> a ${what} to select it · <kbd>⇧</kbd> add · <kbd>⌥</kbd> ${mode === "face" ? "its feature" : "its part"}</span>`;
+        ? `<span class="hint"><b>Tap</b> a face to select it</span>`
+        : `<span class="hint"><b>Click</b> a face to select it · <kbd>⇧</kbd> add · <kbd>⌥</kbd> its feature</span>`;
 }
 $("#selBar").addEventListener("click", (e) => {
   const act = (e.target as Element).closest<HTMLElement>("[data-act]")?.dataset.act;
@@ -772,6 +783,38 @@ function closeExportMenu() {
   exportMenu.hidden = true;
   $("#exportBtn").setAttribute("aria-expanded", "false");
 }
+// Exact STEP runs OpenCascade in its own worker, fetched the first time someone asks for STEP.
+let stepWorker: Worker | null = null;
+let stepSeq = 0;
+const stepWaiting = new Map<number, (r: StepReply) => void>();
+function stepRequest(tree: CadDoc): Promise<StepReply> {
+  if (!stepWorker) {
+    toast("Loading the CAD kernel for STEP (about 7 MB, first time only)…", 6000);
+    stepWorker = new Worker("/js/step-worker.js", { type: "module" });
+    stepWorker.onmessage = (e: MessageEvent<StepReply>) => {
+      stepWaiting.get(e.data.seq)?.(e.data);
+      stepWaiting.delete(e.data.seq);
+    };
+    stepWorker.onerror = (e) => {
+      for (const [seq, done] of stepWaiting) done({ seq, error: e.message || "the CAD kernel didn't load" });
+      stepWaiting.clear();
+      stepWorker?.terminate();
+      stepWorker = null;
+    };
+  }
+  const seq = ++stepSeq;
+  return new Promise((done) => {
+    stepWaiting.set(seq, done);
+    stepWorker!.postMessage({ seq, doc: tree } satisfies StepRequest);
+  });
+}
+/** Exact B-rep STEP; falls back to the faceted one (and says so) if OpenCascade can't do it. */
+async function exactStep(tree: CadDoc, title: string): Promise<{ blob: Blob; note?: string }> {
+  const r = await stepRequest(tree);
+  if ("step" in r) return { blob: new Blob([r.step], { type: "model/step" }) };
+  console.warn("exact STEP failed:", r.error);
+  return { blob: await exportBodies("step", bodies, title), note: `faceted: exact STEP failed (${r.error})` };
+}
 async function exportAs(id: ExportFormat["id"]) {
   closeExportMenu();
   if (!bodies.length) return void toast("Nothing to export yet");
@@ -779,9 +822,10 @@ async function exportAs(id: ExportFormat["id"]) {
   const title = state?.name || "model";
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "model";
   const file = `${slug}-v${shownVersion}.${f.ext}`;
-  let blob: Blob;
+  let blob: Blob, note: string | undefined;
   try {
-    blob = await exportBodies(id, bodies, title);
+    if (id === "step") ({ blob, note } = await exactStep(doc, title));
+    else blob = await exportBodies(id, bodies, title);
   } catch (err) {
     console.error(err);
     return void toast(`Couldn't export ${f.label}. Try again.`);
@@ -791,7 +835,7 @@ async function exportAs(id: ExportFormat["id"]) {
   a.download = file;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  toast(`Downloading ${escapeHtml(file)}`);
+  toast(`Downloading ${escapeHtml(file)}${note ? ` (${escapeHtml(note)})` : ""}`, note ? 6000 : undefined);
 }
 $("#exportBtn").addEventListener("click", () => (exportMenu.hidden ? openExportMenu() : closeExportMenu()));
 exportMenu.addEventListener("click", (e) => {
@@ -931,8 +975,7 @@ $("#viewSheet").addEventListener("click", (e) => {
   if (v) setView(v);
   if (phone.matches && (e.target as Element).closest(".btn,.menu-item") && !(e.target as Element).closest("#deleteBtn,#connectBtn,#viewMenuBtn,#exportBtn")) closeViewSheet();
 });
-document.querySelectorAll<HTMLElement>("[data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode as PickMode)));
-$("#fitBtn").addEventListener("click", fitSelectionOrAll);
+$("#fitBtn").addEventListener("click", () => (fitSelectionOrAll(), closeViewMenu()));
 $("#xrayBtn").addEventListener("click", () => setXray(!xray));
 $("#measureBtn").addEventListener("click", () => setMeasuring(!measuring));
 $("#unitBtn").addEventListener("click", cycleUnit);
@@ -967,10 +1010,10 @@ addEventListener("keydown", (e) => {
   else if (e.shiftKey && e.code === "Digit1") fitAll();
   else if (!e.shiftKey && VIEWS[e.key]) setView(e.key);
   else if (e.code === "KeyF") fitSelectionOrAll();
-  else if (e.code === "KeyG") setMode(mode === "face" ? "feature" : "face");
   else if (e.code === "KeyX") setXray(!xray);
   else if (e.code === "KeyM") setMeasuring(!measuring);
   else if (e.code === "KeyU") cycleUnit();
+  else if (e.code === "KeyB" && e.shiftKey) toggleAllFeatures();
   else if (e.code === "KeyB") setTreeOpen(!document.body.classList.contains("tree-open"));
   else if (e.code === "KeyT") setTheme(theme === "light" ? "dark" : "light");
   else if (e.code === "KeyE") exportMenu.hidden ? openExportMenu() : closeExportMenu();
@@ -1087,7 +1130,6 @@ async function load() {
 
 // ---------- start ----------
 document.documentElement.dataset.theme = theme;
-setMode("face");
 setTreeOpen(phone.matches ? false : prefs.get("tree", true));
 renderTree();
 renderSelBar();

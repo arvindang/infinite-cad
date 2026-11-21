@@ -67,19 +67,18 @@ Viewer (web/) ──► /api/models/:id/...  ──►  CadModel Durable Object 
 
 | Key | Does |
 |---|---|
-| Click / Shift-click / Option-click | Pick a face / add or remove / one level up (face → instance → feature → part) |
-| G | Toggle pick mode (faces / features) |
+| Click / Shift-click / Option-click | Pick a face / add or remove / its instance or feature (whole features and parts: the Features panel) |
 | ⌘C | Copy the link to the selection |
 | Esc | Step back: clear hover, then the selection |
 | Tab / Shift+Tab | Step through features |
-| B | Features panel |
-| F / Shift+1 | Fit the selection / the whole model |
+| B / Shift+B | Features panel / expand or collapse every feature's faces |
+| F / Shift+1 | Fit the selection / the whole model (also the View menu) |
 | 1–7 | Front, back, left, right, top, bottom, iso (also the View menu) |
 | X | X-ray |
 | M | Measure: every part's X/Y/Z and hole Ø; with a selection, only its dimensions |
 | U | Units for measurements: mm, inches, metres |
 | T | Light / dark |
-| E | Export menu, then 1–5: STL, 3MF, STEP (faceted), GLB, OBJ |
+| E | Export menu, then 1–5: STL, 3MF, STEP (exact solids), GLB, OBJ |
 | Shift+⌫ | Delete the model (restorable for 30 days) |
 | + / − | Zoom |
 

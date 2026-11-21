@@ -110,7 +110,7 @@ function frame(o: Vec3, n: Vec3, xHint: Vec3 = [1, 0, 0]): M4 {
 
 // ---------- local face frames (analytic, from params, not from the mesh) ----------
 
-function zBase(f: Feature): number {
+export function zBase(f: Feature): number {
   if (f.type === "box") return f.center ? -f.size[2] / 2 : 0;
   if (f.type === "cylinder" || f.type === "extrude") return f.center ? -f.height / 2 : 0;
   return 0;
@@ -165,7 +165,7 @@ export function localFaceFrame(f: Feature, role: string, holeDepth?: number): M4
 
 // ---------- tessellation + role tagging ----------
 
-const HOLE_LIP = 0.01; // hole cylinders start this far above their face to avoid coplanar slivers
+export const HOLE_LIP = 0.01; // hole cylinders start this far above their face to avoid coplanar slivers
 
 function patternMatrices(p?: Pattern): M4[] {
   const n = instanceCount(p);

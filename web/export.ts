@@ -1,5 +1,5 @@
-// Client-side exports of the built bodies. Everything is a mesh: the kernel is manifold, so STEP is
-// a faceted B-rep (one planar face per triangle), not analytic surfaces.
+// Client-side exports of the built bodies, all from the mesh. STEP here is the faceted fallback
+// (one planar face per triangle); the exact one comes from OpenCascade in web/step-worker.ts.
 import * as THREE from "three";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import type { Body } from "./mesh";
@@ -14,7 +14,7 @@ export interface ExportFormat {
 export const FORMATS: ExportFormat[] = [
   { id: "stl", label: "STL", ext: "stl", note: "3D printing · mm" },
   { id: "3mf", label: "3MF", ext: "3mf", note: "Slicers · parts and mm kept" },
-  { id: "step", label: "STEP", ext: "step", note: "CAD import · faceted solid, mm" },
+  { id: "step", label: "STEP", ext: "step", note: "CAD import · exact solids, mm" },
   { id: "glb", label: "GLB", ext: "glb", note: "Web, AR, Blender · metres, Y up" },
   { id: "obj", label: "OBJ", ext: "obj", note: "Mesh tools · mm" },
 ];

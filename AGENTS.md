@@ -14,7 +14,7 @@ npm run build:web   # esbuild web/viewer.ts, web/home.ts, web/kernel-worker.ts -
 npm run deploy      # wrangler deploy
 ```
 
-There is no unit test suite. Verification is `typecheck` plus `smoke` (scripts/smoke.mjs plays the agent through a real MCP client: create, claim, write, resolve links to faces/features, scoped edits, renames and removals, conflicts, history, REST, WebSocket, trash). It asserts the exact tool count, so update it when adding or removing an MCP tool. The kernel has its own script (scripts/kernel-test.ts).
+There is no unit test suite. Verification is `typecheck` plus `smoke` (scripts/smoke.mjs plays the agent through a real MCP client: create, claim, write, resolve links to faces/features, scoped edits, renames and removals, conflicts, history, REST, WebSocket, trash). It asserts the exact tool count, so update it when adding or removing an MCP tool. The kernel has its own script (scripts/kernel-test.ts), and exact STEP export has `npm run step-test` (rebuilds models with OpenCascade, checks volumes and bounding boxes against the mesh build, reads the STEP back).
 
 ## Architecture
 
@@ -25,6 +25,7 @@ There is no unit test suite. Verification is `typecheck` plus `smoke` (scripts/s
 - **src/ids.ts**: model ids are 14 random a-z0-9 chars and are the only access control (capability URLs, no auth yet); locks are 20. Feature and part ids are agent-chosen slugs. `parseLink()` accepts full links, bare ids, `?v=<n>` and `#ref,ref` fragments.
 - **src/analytics.ts** writes Workers Analytics Engine events (`tool`, `connect`, `create`, `session`, `trash`). Model ids are hashed, and trees, feature ids and refs are never recorded; keep it that way.
 - **web/** is the viewer client (plain TS + three.js, no framework), bundled to `public/js`; the kernel runs in a Web Worker (web/kernel-worker.ts) on the same src/geometry.ts.
+- **Export** is client-side. web/export.ts writes STL, 3MF, GLB, OBJ and a faceted STEP fallback from the meshes. Exact STEP is src/brep.ts in web/step-worker.ts: OpenCascade (replicad, ~23 MB WASM served as a static asset, fetched only on the first STEP export) rebuilds each feature instance as an analytic solid using the matrices and hole depths the manifold build resolved, so any change to `primitive()` in src/geometry.ts needs the same change in src/brep.ts. Keep OpenCascade out of the Worker bundle.
 
 ## Conventions and constraints
 
@@ -32,4 +33,4 @@ There is no unit test suite. Verification is `typecheck` plus `smoke` (scripts/s
 - Ids are addresses. Renames go through `edit_features` `rename` or `write_model` `renames` so aliases are recorded; never infer renames from a diff.
 - The kernel needs real CPU (tens to hundreds of ms per build): production needs Workers Paid. `nodejs_compat` stays on; the manifold loader hides `globalThis.process` around `Module()` to cope with it.
 - New viewer features get a keyboard shortcut and a visible `<kbd>` hint on their control, and the README's "Viewer keys" section is updated to match.
-- Not built yet: auth, comments, notes, embeds, server-side export (STL is client-side), a history UI, per-feature claims, cross-part booleans, fillets.
+- Not built yet: auth, comments, notes, embeds, server-side export (all exports are client-side), a history UI, per-feature claims, cross-part booleans, fillets.

@@ -17,8 +17,8 @@ Where this file and a PLAN.md disagree, this file wins.
 4. **Writes**: reject on `validate()` issues (nothing saved). Accept build errors/empty parts and return them as `warnings`.
 5. `nodejs_compat` stays on; the Worker manifold loader hides `globalThis.process` around `Module()` (kernel PLAN §4).
 6. No `limits.cpu_ms` in wrangler.jsonc for now (dev doesn't need it; note in AGENTS.md that prod needs Workers Paid).
-7. History: last 50 versions in the DO. Aliases table for renames/removals (feature and part ids). No role-level aliases in v1.
-8. v1 ships: 7 MCP tools, DO, REST + WS, viewer, homepage, soft delete + restore, trimmed analytics, client-side STL export, smoke test. Cuts: comments, notes, embeds, server export, weekly report, history UI.
+7. History: ~~last 50 versions~~ every version in the DO (see "After v1"). Aliases table for renames/removals (feature and part ids). No role-level aliases in v1.
+8. v1 ships: 7 MCP tools, DO, REST + WS, viewer, homepage, soft delete + restore, trimmed analytics, client-side STL export, smoke test. Cuts: comments, notes, embeds, server export, weekly report, history UI (comments, notes and history came after v1, below).
 
 ## Module contract (file ownership in brackets)
 
@@ -44,3 +44,11 @@ Where this file and a PLAN.md disagree, this file wins.
 - Homepage: what it is, the MCP URL to add (`<origin>/mcp`), recent models (localStorage), "New model" (POST /api/models).
 
 `package.json` `build:web` (already set) bundles `web/viewer.ts web/home.ts web/kernel-worker.ts` and copies `manifold.wasm` into `public/js`.
+
+## After v1: history, comments, notes
+
+Shapes live in `src/collab.ts` (shared by Worker, DO and viewer). AGENTS.md has the architecture; this is the summary.
+- **History**: every version is kept, each with a `detail` (added/changed/removed/renames/restoredFrom). REST `GET /versions` is a page (`?before=&limit=`, newest first), `GET /diff?from=&to=` gives per-property changes with renames composed across the range, `POST /versions/<n>/restore {baseVersion, by}` commits an old tree as a new version and undoes renames made since (409 while a claim is held or on a stale base). Viewer URLs: `?v=N` = link made at vN; `?v=N&pin` = viewing vN; `?cmp=A-B` = compare.
+- **Comments**: a thread pins one ref (or the whole model) as it was at the version the person saw, plus point, normal, camera and a facts snapshot measured in the Worker. Its `target` follows renames through aliases and detaches (removed/unknown) when the ref stops resolving; `thread-targets` broadcasts changes after each commit, and a write that detaches an open thread warns the agent. People start threads in the viewer; agents read them (`get_model`, `resolve` on `?c=<thread>`) and reply/resolve/reopen with `comment`.
+- **Notes**: one markdown doc per model, versioned with `baseVersion`, no claim needed. Agents write with `write_notes`; `[text](#ref)` links are not rewritten on rename (`get_model` reports `stale_refs`).
+- MCP: 9 tools (adds `comment`, `write_notes`); smoke asserts 9.

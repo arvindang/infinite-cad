@@ -7,24 +7,46 @@ import { type ExportFormat, FORMATS, exportBodies } from "./export";
 import { type Dim, DimLayer, type Unit, UNITS, boxDims, faceDims } from "./measure";
 import type { BuildReply, BuildRequest } from "./kernel-worker";
 import type { StepReply, StepRequest } from "./step-worker";
-import { parseRef, type CadDoc, type Ref } from "../src/schema.ts";
+import { parseRef, type CadDoc, type Ref, type Vec3 } from "../src/schema.ts";
+import type { CameraPose, ModelState, ServerMessage, VersionDiff, VersionInfo, VersionPage, VersionTree } from "../src/collab.ts";
 import { $, MOD, copy, escapeHtml, prefs, rememberModel, toast, viewerId, wireCopyButtons } from "./shared";
+import type { Hit, HostEvent, SelAction, Split, Tool, ViewerHost } from "./host";
+import { initComments } from "./comments";
+import { initHistory } from "./history";
 
 const modelId = location.pathname.split("/")[2] ?? "";
 const phone = matchMedia("(max-width: 820px)");
 const coarse = matchMedia("(pointer: coarse)");
-const linkedVersion = Number(new URLSearchParams(location.search).get("v")) || 0;
+const query = new URLSearchParams(location.search);
+const linkedVersion = Number(query.get("v")) || 0;
+/** Params the modules own; syncUrl keeps them. ?v=N&pin opens vN pinned. */
+const URL_PARAMS = ["pin", "cmp", "c"] as const;
+type UrlParam = (typeof URL_PARAMS)[number];
+const urlParams = new Map<UrlParam, string>();
+for (const k of URL_PARAMS) if (query.has(k)) urlParams.set(k, k === "pin" ? "1" : query.get(k)!);
+let pinned: number | null = urlParams.has("pin") && linkedVersion ? linkedVersion : null;
 
-interface ModelState {
-  id: string;
-  name: string;
-  version: number;
-  status: "working" | "ready";
-  task: string | null;
-  scope: string[];
-  lockExpiresAt: number | null;
-  tree: CadDoc;
+// ---------- module hooks (web/host.ts) ----------
+const listeners = new Map<HostEvent, (() => void)[]>();
+const emit = (ev: HostEvent) => listeners.get(ev)?.forEach((fn) => fn());
+const msgHandlers: ((msg: ServerMessage) => boolean | void)[] = [];
+const keyHandlers: ((e: KeyboardEvent) => boolean)[] = [];
+const escHandlers: { priority: number; fn: () => boolean }[] = [];
+const selActions: SelAction[] = [];
+let selHint: (() => string | null) | null = null;
+let tool: Tool | null = null;
+let toolExiting = false;
+let lastHitV: Hit | null = null;
+let rightInset = 0;
+let split: Split | null = null;
+let bodiesHidden = false;
+const sheets = new Map<string, () => void>();
+function claimSheet(name: string, close: () => void) {
+  for (const [n, fn] of [...sheets]) if (n !== name) sheets.delete(n), fn();
+  sheets.set(name, close);
 }
+const releaseSheet = (name: string) => void sheets.delete(name);
+
 type Claim = Pick<ModelState, "status" | "task" | "scope" | "lockExpiresAt">;
 type BuildError = { featureId: string; message: string };
 
@@ -82,7 +104,10 @@ function setModel(meshes: Body[], next: CadDoc) {
   }
   bodies = meshes;
   doc = next;
-  for (const b of bodies) scene.add(b.mesh, b.edges);
+  for (const b of bodies) {
+    b.mesh.visible = b.edges.visible = !bodiesHidden;
+    scene.add(b.mesh, b.edges);
+  }
   hoverKey = null;
   hoverRefs = new Set();
   moveDirty = true; // re-pick under the cursor
@@ -127,6 +152,12 @@ function parent(key: string): string | null {
   return partOfFeature.get(k.id) ?? null;
 }
 const exists = (key: string) => expand(key).length > 0 || partIds.has(key) || partOfFeature.has(key);
+/** The key, or the nearest level around it that's still here (a face that's gone falls back to its feature). */
+function resolveKey(key: string): string | null {
+  if (exists(key)) return key;
+  for (let p: string | null | undefined = parent(key) ?? parseRef(key)?.id; p; p = parent(p)) if (exists(p)) return p;
+  return null;
+}
 
 // ---------- highlight: vertex colors, one draw call, per-ref range writes ----------
 let selection: string[] = [];
@@ -188,10 +219,13 @@ function setSelection(keys: string[], opts: { fit?: boolean; hash?: boolean } = 
   renderSelBar();
   markTree();
   refreshDims();
+  emit("selection");
 }
-/** The address bar is always the link you'd copy. */
+/** The address bar is always the link you'd copy, plus the modules' params (pinned version, compare, thread). */
 function syncUrl() {
-  const url = `/m/${modelId}${shownVersion ? `?v=${shownVersion}` : ""}${selection.length ? `#${selection.join(",")}` : ""}`;
+  const q = [shownVersion ? `v=${shownVersion}` : "", ...URL_PARAMS.filter((k) => urlParams.has(k)).map((k) => (k === "pin" ? k : `${k}=${encodeURIComponent(urlParams.get(k)!)}`))]
+    .filter(Boolean).join("&");
+  const url = `/m/${modelId}${q ? `?${q}` : ""}${selection.length ? `#${selection.join(",")}` : ""}`;
   if (location.pathname + location.search + location.hash !== url) history.replaceState(null, "", url);
 }
 /** Add or remove one key; adding drops keys it covers and keys that cover it. */
@@ -219,7 +253,8 @@ function setHover(key: string | null) {
 const raycaster = new THREE.Raycaster();
 raycaster.firstHitOnly = true;
 const ndc = new THREE.Vector2();
-function pickAt(x: number, y: number): string | null {
+function pickHit(x: number, y: number): Hit | null {
+  if (bodiesHidden) return null;
   const r = canvas.getBoundingClientRect();
   ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
@@ -228,8 +263,10 @@ function pickAt(x: number, y: number): string | null {
   const b = bodies.find((x) => x.mesh === hit.object)!;
   // The BVH reorders the index it adds, so faceIndex isn't our triangle order; the
   // non-indexed positions are (vertex / 3 = triangle).
-  return b.refs[b.triRef[Math.floor(hit.face.a / 3)]];
+  const ref = b.refs[b.triRef[Math.floor(hit.face.a / 3)]];
+  return { ref, point: hit.point, normal: hit.face.normal.clone().transformDirection(hit.object.matrixWorld), distance: hit.distance };
 }
+const pickAt = (x: number, y: number): string | null => pickHit(x, y)?.ref ?? null;
 /** A click picks the face; Option picks the level around it (its instance or feature). */
 function keyFor(ref: string, up: boolean): string {
   return (up && parent(ref)) || ref;
@@ -258,7 +295,10 @@ canvas.addEventListener("pointerup", (e) => {
   const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5 || performance.now() - down.t > 600;
   down = null;
   if (moved || e.button !== 0) return; // an orbit or pan
-  const ref = pickAt(e.clientX, e.clientY);
+  const hit = pickHit(e.clientX, e.clientY);
+  lastHitV = hit;
+  if (tool?.click?.(hit, e)) return;
+  const ref = hit?.ref;
   if (!ref) {
     if (!e.shiftKey && !multi) setSelection([]);
     return;
@@ -271,10 +311,16 @@ canvas.addEventListener("dblclick", () => selectedRefs.size && fitRefs([...selec
 function hoverFrame() {
   if (!moveDirty || !lastMove || down) return;
   moveDirty = false;
+  if (tool && tool.hover === false) {
+    setHover(null);
+    tip.hidden = true;
+    canvas.style.cursor = tool.cursor ?? "";
+    return;
+  }
   const ref = pickAt(lastMove.x, lastMove.y);
   const key = ref ? keyFor(ref, lastMove.alt) : null;
   setHover(key);
-  canvas.style.cursor = key ? "pointer" : "";
+  canvas.style.cursor = tool?.cursor ?? (key ? "pointer" : "");
   tip.hidden = !key;
   if (key) {
     tip.textContent = key;
@@ -369,16 +415,28 @@ const worker = new Worker("/js/kernel-worker.js", { type: "module" });
 let seq = 0;
 let building: { seq: number; version: number; tree: CadDoc; changed?: string[]; summary?: string } | null = null;
 let firstBuild = true;
+const buildWaiters = new Map<number, () => void>(); // seq -> resolve, for showVersion
 function requestBuild(version: number, tree: CadDoc, extra: { changed?: string[]; summary?: string } = {}) {
   building = { seq: ++seq, version, tree, ...extra };
   renderSelBar();
   worker.postMessage({ seq, doc: tree } satisfies BuildRequest);
+  return seq;
+}
+function settleBuilds(upTo = Infinity) {
+  for (const [s, done] of buildWaiters) if (s <= upTo) buildWaiters.delete(s), done();
 }
 worker.addEventListener("message", (e: MessageEvent<BuildReply>) => {
   const r = e.data;
   if (!building || r.seq !== building.seq) return; // a newer version is on its way
   const job = building;
   building = null;
+  try {
+    built(r, job);
+  } finally {
+    settleBuilds(job.seq);
+  }
+});
+function built(r: BuildReply, job: NonNullable<typeof building>) {
   if ("fatal" in r) {
     failed = { version: job.version, lines: [`The geometry kernel stopped: ${escapeHtml(r.fatal)}`] };
     return renderStatus();
@@ -414,14 +472,45 @@ worker.addEventListener("message", (e: MessageEvent<BuildReply>) => {
     firstBuild = false;
     if (!applyHash()) fitAll();
     landNow();
-    if (linkedVersion && linkedVersion < job.version && before === 0) changedSinceLink(linkedVersion);
+    if (linkedVersion && linkedVersion < job.version && before === 0 && pinned == null) changedSinceLink(linkedVersion);
   }
   setClaim(claim); // scope refs may have appeared
-});
+  emit("build");
+}
 worker.addEventListener("error", (e) => {
   failed = { version: state?.version ?? 0, lines: [`Couldn't load the geometry kernel: ${escapeHtml(e.message || "unknown error")}`] };
   renderStatus();
+  settleBuilds();
 });
+
+// ---------- pinned: viewing a past version ----------
+async function showVersion(v: number | null): Promise<void> {
+  if (v == null) {
+    const was = pinned;
+    pinned = null;
+    urlParams.delete("pin");
+    syncUrl();
+    if (was != null) renderStatus();
+    if (!state || state.version === (building?.version ?? shownVersion)) return;
+    const s = requestBuild(state.version, state.tree);
+    return new Promise((done) => buildWaiters.set(s, done));
+  }
+  pinned = v;
+  urlParams.set("pin", "1");
+  renderStatus();
+  if (v === (building?.version ?? shownVersion)) return syncUrl();
+  try {
+    const res = await fetch(`/api/models/${modelId}/versions/${v}`);
+    if (!res.ok) throw new Error(String(res.status));
+    const t = (await res.json()) as VersionTree;
+    if (pinned !== v) return; // moved on meanwhile
+    const s = requestBuild(v, t.tree);
+    return new Promise((done) => buildWaiters.set(s, done));
+  } catch {
+    toast(`Couldn't load v${v}`, 3000);
+    if (pinned === v) return showVersion(null);
+  }
+}
 
 // ---------- flash what changed ----------
 const FLASH_MS = 1100;
@@ -445,10 +534,17 @@ function stepFlash(now: number) {
 /** Opened a link from an older version: show what changed since. */
 async function changedSinceLink(v: number) {
   try {
-    const res = await fetch(`/api/models/${modelId}/versions`);
-    if (!res.ok) return;
-    const list = (await res.json()) as { version: number; changed: string[] }[];
-    const changed = [...new Set(list.filter((x) => x.version > v).flatMap((x) => x.changed))];
+    let changed: string[];
+    const res = await fetch(`/api/models/${modelId}/diff?from=${v}`);
+    if (res.ok) changed = [...new Set(((await res.json()) as VersionDiff).changes.map((c) => c.id))];
+    else {
+      // older Worker: no /diff yet
+      const r2 = await fetch(`/api/models/${modelId}/versions`);
+      if (!r2.ok) return;
+      const page = (await r2.json()) as VersionPage | VersionInfo[];
+      const list = Array.isArray(page) ? page : page.versions;
+      changed = [...new Set(list.filter((x) => x.version > v).flatMap((x) => x.changed))];
+    }
     if (!changed.length) return;
     flash(changed);
     toast(`This link is from v${v}. Changed since: ${changed.slice(0, 6).map((c) => `<code>${escapeHtml(c)}</code>`).join(", ")}${changed.length > 6 ? ` and ${changed.length - 6} more` : ""}`, 6000);
@@ -471,6 +567,7 @@ function setClaim(c: Claim) {
   if (!pulseRefs.size) pulseAmt = 0;
   repaint([...prev, ...pulseRefs]);
   renderStatus();
+  emit("claim");
 }
 setInterval(() => {
   if (claim.status === "working" && !claimActive()) setClaim({ ...claim, status: "ready" });
@@ -510,6 +607,7 @@ function renderTree() {
       }).join("")}</ol>
     </li>`).join("");
   markTree();
+  emit("tree");
 }
 /** Selection and hover classes only: the tree's markup is rebuilt per version, not per click. */
 function markTree() {
@@ -571,7 +669,8 @@ function syncTreeAll() {
 $("#treeAllBtn").addEventListener("click", toggleAllFeatures);
 
 function setTreeOpen(on: boolean) {
-  if (on && phone.matches) closeViewSheet();
+  if (on && phone.matches) closeViewSheet(), claimSheet("tree", () => setTreeOpen(false));
+  if (!on) releaseSheet("tree");
   document.body.classList.toggle("tree-open", on);
   $("#treeBtn").setAttribute("aria-pressed", String(on));
   if (!phone.matches) prefs.set("tree", on);
@@ -594,11 +693,14 @@ function renderSelBar() {
       <div class="actions">
         ${coarse.matches && up ? `<button class="btn" data-act="parent" title="Select the feature or part around it">↑ Up</button>` : ""}
         ${coarse.matches ? `<button class="btn" data-act="multi" aria-pressed="${multi}" title="Tap more faces to add or remove them">+ Add</button>` : ""}
+        ${selActions.map((a) => a.html()).join("")}
         <button class="btn primary" data-act="copy" title="Copy a link to the selection (${MOD}C)">Copy link <kbd>${MOD}C</kbd></button>
         <button class="btn" data-act="clear" title="Clear (Esc)" aria-label="Clear selection">✕ <kbd>Esc</kbd></button>
       </div>`;
     return;
   }
+  const hint = selHint?.();
+  if (hint) return void (bar.innerHTML = `<span class="hint">${hint}</span>`);
   bar.innerHTML = measuring && doc.parts.length && !(building && firstBuild)
     ? `<span class="hint">Measuring every part · <b>${coarse.matches ? "Tap" : "Click"}</b> a face to measure only it${coarse.matches ? "" : ` · <kbd>U</kbd> ${unit}`}</span>`
     : building && firstBuild
@@ -618,6 +720,7 @@ $("#selBar").addEventListener("click", (e) => {
     renderSelBar();
   }
   if (act === "parent") setSelection(selection.map((k) => parent(k) ?? k));
+  selActions.find((a) => a.act === act)?.run();
 });
 function copyLink() {
   const n = selection.length;
@@ -629,11 +732,7 @@ function copyLink() {
 function applyHash(): boolean {
   const keys = decodeURIComponent(location.hash.slice(1)).split(",").map((s) => s.trim()).filter(Boolean);
   if (!keys.length) return false;
-  const resolved = keys.map((k) => {
-    if (exists(k)) return k;
-    for (let p: string | null | undefined = parent(k) ?? parseRef(k)?.id; p; p = parent(p)) if (exists(p)) return p;
-    return k;
-  });
+  const resolved = keys.map((k) => resolveKey(k) ?? k);
   const fellBack = keys.filter((k, i) => resolved[i] !== k);
   const lost = resolved.filter((k) => !exists(k));
   setSelection(resolved, { fit: true });
@@ -651,7 +750,9 @@ addEventListener("hashchange", () => applyHash());
 function renderStatus() {
   const card = $("#errors");
   const v = $("#version");
-  v.textContent = failed && shownVersion ? `v${failed.version} · showing v${shownVersion}` : shownVersion ? `v${shownVersion}` : state ? `v${state.version}` : "v–";
+  v.textContent = failed && shownVersion ? `v${failed.version} · showing v${shownVersion}`
+    : pinned != null && state ? `v${pinned} of ${state.version}`
+    : shownVersion ? `v${shownVersion}` : state ? `v${state.version}` : "v–";
   document.body.classList.toggle("stale", !!failed && bodies.length > 0);
   if (failed) {
     card.hidden = false;
@@ -679,6 +780,7 @@ function setTheme(t: Theme) {
   sizeGrid();
   paintAll();
   dimLayer.setColor(pal().dim);
+  emit("theme");
 }
 let xray = false;
 function setXray(on: boolean) {
@@ -928,6 +1030,7 @@ function openConnect() {
   $("#promptEx").textContent = `${location.origin}/m/${modelId}\nDesign a wall bracket for a 30 mm pipe, two M4 mounting holes.`;
 }
 function closeViewSheet() {
+  releaseSheet("view");
   document.body.classList.remove("view-open");
   $("#viewBtn").setAttribute("aria-expanded", "false");
 }
@@ -966,7 +1069,8 @@ $("#emptyConnect").addEventListener("click", openConnect);
 wireCopyButtons($("#connectPop"));
 $("#viewBtn").addEventListener("click", () => {
   const on = !document.body.classList.contains("view-open");
-  if (on) setTreeOpen(false);
+  if (on) setTreeOpen(false), claimSheet("view", closeViewSheet);
+  else releaseSheet("view");
   document.body.classList.toggle("view-open", on);
   $("#viewBtn").setAttribute("aria-expanded", String(on));
 });
@@ -998,10 +1102,12 @@ addEventListener("keydown", (e) => {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key !== "Escape" && keyHandlers.some((fn) => fn(e))) return void e.preventDefault();
   const del = e.key === "Backspace" || e.key === "Delete";
   if (e.key === "Escape") {
     if (!$("#viewMenu").hidden) closeViewMenu(), $("#viewMenuBtn").focus();
     else if (!$("#connectPop").hidden || document.body.classList.contains("view-open")) closePops();
+    else if (escHandlers.some((h) => h.fn())) {}
     else if (selection.length) setSelection([]);
     else if (measuring) setMeasuring(false);
     else if (xray) setXray(false);
@@ -1032,14 +1138,40 @@ function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (!w || !h) return;
   renderer.setSize(w, h, false);
-  // the features panel covers the left: shift the projection so the model centers in what's visible
-  const p = panelInset();
-  if (p) camera.setViewOffset(w + p, h, 0, 0, w, h);
-  else camera.clearViewOffset();
-  camera.aspect = (w + p) / h;
+  // the features panel covers the left, a side panel the right: shift the projection so the model centers in what's visible
+  const L = panelInset(), R = rightInset;
+  document.body.style.setProperty("--right-inset", `${R}px`);
+  if (split) {
+    // each half gets its own viewport (renderSplit), so no offset
+    camera.clearViewOffset();
+    camera.aspect = split.dir === "h" ? (w - L - R) / 2 / h : (w - L - R) / (h / 2);
+    visibleAspect = camera.aspect;
+  } else {
+    const d = Math.abs(L - R);
+    if (!d) camera.clearViewOffset();
+    else camera.setViewOffset(w + d, h, L >= R ? 0 : d, 0, w, h);
+    camera.aspect = (w + d) / h;
+    visibleAspect = (w - L - R) / h;
+  }
   camera.updateProjectionMatrix();
-  visibleAspect = (w - p) / h;
   needsRender = true;
+  emit("resize");
+}
+/** Compare: two viewports side by side ("h") or stacked ("v", old on top) inside the visible area. */
+function renderSplit(s: Split) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const L = panelInset(), vw = w - L - rightInset;
+  renderer.setScissorTest(true);
+  for (const i of [0, 1] as const) {
+    // three's viewport y counts from the bottom
+    const [x, y, pw, ph] = s.dir === "h" ? [L + (i * vw) / 2, 0, vw / 2, h] : [L, i === 0 ? h / 2 : 0, vw, h / 2];
+    renderer.setViewport(x, y, pw, ph);
+    renderer.setScissor(x, y, pw, ph);
+    s.pass(i);
+    renderer.render(scene, camera);
+  }
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, w, h);
 }
 new ResizeObserver(resize).observe(canvas);
 phone.addEventListener("change", resize);
@@ -1058,9 +1190,11 @@ function loop(now: number) {
   stepPulse(now);
   controls.update();
   if (needsRender) {
-    renderer.render(scene, camera);
-    placeDims();
     needsRender = false;
+    if (split) renderSplit(split);
+    else renderer.render(scene, camera);
+    placeDims();
+    emit("render");
   }
 }
 
@@ -1077,10 +1211,11 @@ function connect() {
   });
   ws.addEventListener("message", (e) => {
     if (e.data === "pong") return;
-    const msg = JSON.parse(e.data);
+    const msg = JSON.parse(e.data) as ServerMessage;
     if (msg.type === "tree") {
       if (state) Object.assign(state, { version: msg.version, tree: msg.tree });
-      if (msg.version > (building?.version ?? shownVersion)) requestBuild(msg.version, msg.tree, { changed: msg.changed, summary: msg.summary });
+      if (pinned != null) renderStatus(); // stays on the pinned version; "latest" moves on
+      else if (msg.version > (building?.version ?? shownVersion)) requestBuild(msg.version, msg.tree, { changed: msg.changed, summary: msg.summary });
     } else if (msg.type === "claim") setClaim(msg);
     else if (msg.type === "model") {
       if (state) state.name = msg.name;
@@ -1090,6 +1225,7 @@ function connect() {
       $("#trashed").hidden = true;
       load();
     }
+    for (const fn of msgHandlers) fn(msg);
   });
   ws.addEventListener("close", () => {
     setLive(false);
@@ -1124,9 +1260,111 @@ async function load() {
   setName(state.name);
   rememberModel(state.id, state.name);
   setClaim(state);
-  if (state.version !== (building?.version ?? shownVersion)) requestBuild(state.version, state.tree);
+  if (pinned != null) {
+    if (pinned !== (building?.version ?? shownVersion)) showVersion(pinned);
+  } else if (state.version !== (building?.version ?? shownVersion)) requestBuild(state.version, state.tree);
   renderStatus();
+  emit("load");
 }
+
+// ---------- the host the modules build on (web/host.ts) ----------
+const v3 = (v: THREE.Vector3) => v.toArray().map((n) => Math.round(n * 1000) / 1000) as Vec3;
+const host: ViewerHost = {
+  modelId,
+  state: () => (state ? { name: state.name, version: state.version } : null),
+  shownVersion: () => shownVersion,
+  pinned: () => pinned,
+  doc: () => doc,
+  meshes: () => bodies.map((b) => b.mesh),
+  claimActive,
+  expand,
+  exists,
+  parent,
+  resolveKey,
+  refRange(ref) {
+    const info = refInfo.get(ref);
+    if (!info) return null;
+    return { positions: info.body.mesh.geometry.attributes.position.array as Float32Array, ...info.body.range[info.index] };
+  },
+  selection: () => [...selection],
+  setSelection: (keys, opts) => setSelection(keys, { fit: opts?.fit }),
+  setHover,
+  pickHit,
+  lastHit: () => lastHitV,
+  three: { renderer, scene, camera, controls, canvas },
+  cameraPose: (): CameraPose => ({ position: v3(camera.position), target: v3(controls.target), up: v3(camera.up), fov: camera.fov }),
+  // up stays Z (OrbitControls fixes it at construction); fov stays the viewer's
+  setCameraPose: (p) => flyTo(new THREE.Vector3(...p.target), new THREE.Vector3(...p.position)),
+  fitRefs,
+  fitBox,
+  boxOfRefs,
+  requestRender: () => void (needsRender = true),
+  palette: () => {
+    const { bg, body, edge, accent, flash } = pal();
+    return { bg, body, edge, accent, flash };
+  },
+  setTool(t) {
+    if (tool === t || toolExiting) return; // a tool's exit() can't change tools
+    const prev = tool;
+    tool = t;
+    toolExiting = true;
+    try {
+      prev?.exit();
+    } finally {
+      toolExiting = false;
+    }
+    canvas.style.cursor = t?.cursor ?? "";
+    if (t?.hover === false) setHover(null), (tip.hidden = true);
+    moveDirty = true;
+  },
+  tool: () => tool,
+  setRightInset(px) {
+    rightInset = Math.max(0, px);
+    resize();
+  },
+  insets: () => ({ left: panelInset(), right: rightInset }),
+  setSplit(s) {
+    split = s;
+    controls.zoomToCursor = !s;
+    resize();
+  },
+  setBodiesHidden(on) {
+    bodiesHidden = on;
+    for (const b of bodies) b.mesh.visible = b.edges.visible = !on;
+    if (on) setHover(null), (tip.hidden = true);
+    needsRender = true;
+  },
+  setMeasuring,
+  claimSheet,
+  releaseSheet,
+  showVersion,
+  setUrlParam(key, value) {
+    if (value == null) urlParams.delete(key);
+    else urlParams.set(key, key === "pin" ? "1" : value);
+    syncUrl();
+  },
+  urlParam: (key) => urlParams.get(key) ?? null,
+  onKey: (fn) => void keyHandlers.push(fn),
+  onEscape(priority, fn) {
+    escHandlers.push({ priority, fn });
+    escHandlers.sort((a, b) => a.priority - b.priority);
+  },
+  addSelAction(a) {
+    selActions.push(a);
+    renderSelBar();
+  },
+  setSelHint(fn) {
+    selHint = fn;
+    renderSelBar();
+  },
+  renderSelBar,
+  toast,
+  on(ev, fn) {
+    if (!listeners.has(ev)) listeners.set(ev, []);
+    listeners.get(ev)!.push(fn);
+  },
+  onMessage: (fn) => void msgHandlers.push(fn),
+};
 
 // ---------- start ----------
 document.documentElement.dataset.theme = theme;
@@ -1135,5 +1373,7 @@ renderTree();
 renderSelBar();
 sizeGrid();
 paintAll();
+initComments(host);
+initHistory(host);
 requestAnimationFrame(loop);
 load().then(connect);

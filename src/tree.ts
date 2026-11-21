@@ -1,7 +1,8 @@
 // Pure tree operations: canonical JSON, lookup, diff, scoped edits (applyOps), did-you-mean.
 // Runs in the Durable Object, the Worker and the browser: no DOM, no node, no WASM.
 
-import { type CadDoc, type Feature, type Issue, type Part, ID_RE, parseRef, validate } from "./schema.ts";
+import type { ItemDiff, PropertyChange, VersionDiff } from "./collab.ts";
+import { type CadDoc, type Feature, type Issue, type Part, ID_RE, instanceCount, parseRef, rolesOf, validate } from "./schema.ts";
 
 // ---------- canonical JSON ----------
 
@@ -79,6 +80,105 @@ export function diff(prev: CadDoc, next: CadDoc): TreeDiff {
   }
   for (const id of a.keys()) if (!b.has(id)) out.removed.push(id);
   return out;
+}
+
+// ---------- refs against a tree ----------
+
+/** Why `ref` doesn't point at anything in `doc` (null when it does). Pure: no geometry, no aliases. */
+export function refProblem(doc: CadDoc, ref: string): string | null {
+  const r = parseRef(ref);
+  if (!r) return `"${ref}" is not a ref (expected part, feature, feature:n, feature.role or feature:n.role)`;
+  const part = (doc.parts ?? []).find((p) => p.id === r.id);
+  if (part) return r.role || r.instance ? `"${r.id}" is a part; parts have no faces or instances (faces belong to features: <feature>.<role>)` : null;
+  const loc = findFeature(doc, r.id);
+  if (!loc) return `no part or feature "${r.id}"`;
+  const f = loc.feature;
+  const n = instanceCount(f.pattern);
+  if (r.instance && r.instance > n) return `"${r.id}" has ${n} instance${n === 1 ? "" : "s"}`;
+  if (r.role) {
+    const roles = rolesOf(f);
+    if (!roles.includes(r.role)) return `${f.type} "${r.id}" has no face "${r.role}" (faces: ${roles.join(", ")})`;
+    if (n > 1 && !r.instance) return `"${r.id}" has ${n} instances; use ${r.id}:1.${r.role} … ${r.id}:${n}.${r.role}`;
+  }
+  return null;
+}
+
+// ---------- property diff ----------
+
+const isPlain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** Leaf-level changes between two values. Plain objects recurse; arrays and scalars are compared whole. */
+function propChanges(a: unknown, b: unknown, path: string, out: PropertyChange[]) {
+  if (isPlain(a) && isPlain(b)) {
+    const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])];
+    for (const k of keys) {
+      if (!path && k === "id") continue;
+      const p = path ? `${path}.${k}` : k;
+      if (a[k] === undefined && b[k] !== undefined) out.push({ path: p, to: b[k] });
+      else if (a[k] !== undefined && b[k] === undefined) out.push({ path: p, from: a[k] });
+      else if (a[k] !== undefined) propChanges(a[k], b[k], p, out);
+    }
+    return;
+  }
+  if (canonical(a) !== canonical(b)) out.push({ path, from: a, to: b });
+}
+
+interface Item { id: string; kind: "part" | "feature"; part: string; value: unknown; index: number }
+
+function items(doc: CadDoc): Map<string, Item> {
+  const m = new Map<string, Item>();
+  for (const p of doc.parts ?? []) {
+    const { features: _f, ...head } = p;
+    m.set(p.id, { id: p.id, kind: "part", part: p.id, value: head, index: m.size });
+    (p.features ?? []).forEach((f, i) => m.set(f.id, { id: f.id, kind: "feature", part: p.id, value: f, index: i }));
+  }
+  return m;
+}
+
+/**
+ * Per-property changes from prev to next. `renames` maps prev ids to next ids (composed across the
+ * range); without them a rename reads as removed + added. Changes come in next's tree order, then
+ * what was removed. Never lists `id` as a property; a feature moved to another part changes "part".
+ */
+export function propertyDiff(prev: CadDoc, next: CadDoc, renames: Record<string, string> = {}): Omit<VersionDiff, "from" | "to" | "renamesComplete"> {
+  const a = items(prev), b = items(next);
+  const fwd = new Map<string, string>();
+  for (const [from, to] of Object.entries(renames)) if (a.has(from) && b.has(to) && a.get(from)!.kind === b.get(to)!.kind) fwd.set(from, to);
+  const claimed = new Set(fwd.values());
+  for (const id of a.keys()) if (!fwd.has(id) && b.has(id) && !claimed.has(id) && !(id in renames)) fwd.set(id, id);
+  const back = new Map([...fwd].map(([x, y]) => [y, x]));
+  const partOf = (id: string) => fwd.get(id) ?? id;
+
+  const changes: ItemDiff[] = [];
+  for (const it of b.values()) {
+    const was = back.get(it.id);
+    if (was === undefined) {
+      changes.push({ id: it.id, kind: it.kind, part: it.part, change: "added", props: [], value: it.value });
+      continue;
+    }
+    const old = a.get(was)!;
+    const props: PropertyChange[] = [];
+    if (it.kind === "feature" && partOf(old.part) !== it.part) props.push({ path: "part", from: old.part, to: it.part });
+    propChanges(old.value, it.value, "", props);
+    if (was !== it.id) changes.push({ id: it.id, was, kind: it.kind, part: it.part, change: "renamed", props });
+    else if (props.length) changes.push({ id: it.id, kind: it.kind, part: it.part, change: "changed", props });
+  }
+  for (const it of a.values()) {
+    if (!fwd.has(it.id)) changes.push({ id: it.id, kind: it.kind, part: it.part, change: "removed", props: [], value: it.value });
+  }
+
+  // a part whose surviving features changed relative order
+  const reordered: string[] = [];
+  for (const p of next.parts ?? []) {
+    const oldPart = back.get(p.id);
+    if (oldPart === undefined) continue;
+    const kept = (p.features ?? []).map((f) => back.get(f.id)).filter((x): x is string => x !== undefined && a.get(x)!.part === oldPart);
+    const before = [...kept].sort((x, y) => a.get(x)!.index - a.get(y)!.index);
+    if (kept.join() !== before.join()) reordered.push(p.id);
+  }
+  const effective: Record<string, string> = {};
+  for (const [x, y] of fwd) if (x !== y) effective[x] = y;
+  return { renames: effective, changes, reordered };
 }
 
 // ---------- applyOps ----------

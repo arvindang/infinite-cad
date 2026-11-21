@@ -1,7 +1,7 @@
 // End-to-end check through a real MCP client: node scripts/smoke.mjs [baseUrl]
 // Plays the agent: creates a model, claims and writes it, follows links to faces and
 // features, makes scoped edits, renames and removes features, and checks locks,
-// version conflicts, history, the REST API, the WebSocket and the trash.
+// version conflicts, history (diffs, restores), comments, notes, the REST API, the WebSocket and the trash.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -30,15 +30,23 @@ const ok = (cond, msg) => {
 const rest = (path, method = "GET", body) =>
   fetch(`${base}${path}`, { method, headers: { ...UA, ...(body ? { "Content-Type": "application/json" } : {}) }, body: body && JSON.stringify(body) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (pred, ms = 3000) => {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(50)) if (messages.some(pred)) return true;
+  return false;
+};
 const featuresOf = (tree) => Object.fromEntries(tree.parts.flatMap((p) => p.features.map((f) => [f.id, JSON.stringify(f)])));
 
 // ---------- the contract ----------
 
 const { tools } = await client.listTools();
 const names = tools.map((t) => t.name).sort().join(",");
-ok(tools.length === 7 && names === "create_model,edit_features,get_model,release_edit,resolve,start_edit,write_model", `lists ${tools.length} tools: ${names}`);
+ok(
+  tools.length === 9 && names === "comment,create_model,edit_features,get_model,release_edit,resolve,start_edit,write_model,write_notes",
+  `lists ${tools.length} tools: ${names}`,
+);
 const instructions = client.getInstructions() || "";
 ok(instructions.includes("Edit only what's linked") && instructions.includes("call resolve") && instructions.includes("Refs:"), "server instructions carry the contract and the schema");
+ok(instructions.includes("Comments:") && instructions.includes("write_notes") && instructions.includes("?c="), "server instructions explain comments and notes");
 
 // ---------- a new model ----------
 
@@ -201,7 +209,7 @@ ok((await (await rest(`/api/models/${id}`)).json()).status === "ready", "the vie
 // 9. history and REST
 const old = await call("get_model", { link, version: 1 });
 ok(old.model.version === 1 && old.model.current_version > 1 && featuresOf(old.tree)["boss"], "get_model reads an old version");
-const versions = await (await rest(`/api/models/${id}/versions`)).json();
+const versions = (await (await rest(`/api/models/${id}/versions`)).json()).versions;
 ok(versions.length >= 10 && versions[0].version > versions[1].version, `REST lists ${versions.length} versions, newest first`);
 ok((await (await rest(`/api/models/${id}/versions/1`)).json()).tree.parts.length === 2, "REST reads an old tree");
 const page = await rest(`/m/${id}`);
@@ -211,7 +219,133 @@ ok((await rest(`/api/models/${id}`, "PATCH", { name: "Bracket v2" })).ok && (awa
 const oneStep = await call("create_model", { name: "One step", tree: { parts: [{ id: "cube", features: [{ id: "body", type: "box", size: [10, 10, 10] }] }] } });
 ok(oneStep.version === 1 && oneStep.parts[0].volume_mm3 === 1000, "create_model with a tree builds v1 in one call");
 
-// 10. trash
+// 10. every version is kept, with details, pages and per-property diffs
+const pageAll = await (await rest(`/api/models/${id}/versions`)).json();
+const current = (await (await rest(`/api/models/${id}`)).json()).version;
+ok(!Array.isArray(pageAll) && pageAll.current === current && pageAll.versions[0].version === current && pageAll.oldest === 0, `GET /versions is a page: newest v${current} first, oldest v0`);
+const p1 = await (await rest(`/api/models/${id}/versions?limit=3`)).json();
+ok(p1.versions.length === 3 && p1.next === p1.versions[2].version, "?limit=3 returns 3 versions and where to continue");
+const p2 = await (await rest(`/api/models/${id}/versions?limit=3&before=${p1.next}`)).json();
+ok(p2.versions[0].version === p1.next - 1 && !p2.versions.some((v) => p1.versions.some((w) => w.version === v.version)), "?before= continues with older versions, no overlap");
+ok((await (await rest(`/api/models/${id}/versions/2`)).json()).detail.changed.includes("mount-holes"), "a version's detail says what changed");
+const d12 = await (await rest(`/api/models/${id}/diff?from=1&to=2`)).json();
+const holesDiff = d12.changes.find((c) => c.id === "mount-holes");
+ok(holesDiff?.change === "changed" && holesDiff.props.some((x) => x.path === "diameter" && x.from === 5 && x.to === 6) && d12.changes.length === 1, "GET /diff gives per-property changes (mount-holes diameter 5 → 6)");
+const d24 = await (await rest(`/api/models/${id}/diff?from=2&to=4`)).json();
+const postDiff = d24.changes.find((c) => c.id === "post");
+const boreDiff = d24.changes.find((c) => c.id === "boss-bore");
+ok(d24.renames.boss === "post" && postDiff?.change === "renamed" && postDiff.was === "boss" && d24.renamesComplete, "a diff across two renames composes them (boss → post)");
+ok(boreDiff?.props.some((x) => x.path === "at" && x.from === "boss.top" && x.to === "post.top"), "and shows the at refs the rename rewrote");
+const d42 = await (await rest(`/api/models/${id}/diff?from=4&to=2`)).json();
+ok(d42.changes.find((c) => c.id === "boss")?.was === "post", "a backwards diff inverts the renames");
+ok((await rest(`/api/models/${id}/diff`)).status === 400 && (await rest(`/api/models/${id}/diff?from=999`)).status === 404, "a diff needs from= and a kept version");
+
+// 11. restore an old version
+const held = await call("start_edit", { link, task: "Holding the model" });
+const blocked = await rest(`/api/models/${id}/versions/1/restore`, "POST", { by: "person:Quiet Otter" });
+ok(blocked.status === 409 && (await blocked.json()).error.includes("being edited by another session"), "a restore is refused (409) while someone holds a claim");
+await call("release_edit", { link, lock: held.lock });
+const staleRestore = await rest(`/api/models/${id}/versions/1/restore`, "POST", { baseVersion: 1 });
+ok(staleRestore.status === 409 && (await staleRestore.json()).error.startsWith("Version conflict"), "a restore from a stale base is refused (409)");
+ok((await rest(`/api/models/${id}/versions/999/restore`, "POST", {})).status === 404, "restoring a missing version is 404");
+const restored = await (await rest(`/api/models/${id}/versions/1/restore`, "POST", { baseVersion: current, by: "person:Quiet Otter" })).json();
+const v1tree = (await (await rest(`/api/models/${id}/versions/1`)).json()).tree;
+ok(restored.version === current + 1 && restored.restoredFrom === 1 && !restored.unchanged && JSON.stringify(restored.tree) === JSON.stringify(v1tree), "restore saves v1's tree as a new version");
+ok(restored.renames.post === "boss" && restored.renames["lid-panel"] === "lid-plate", "restore undoes the renames made since");
+const newest = (await (await rest(`/api/models/${id}/versions?limit=1`)).json()).versions[0];
+ok(newest.summary === "Restored v1" && newest.detail.restoredFrom === 1 && newest.by === "person:Quiet Otter", "history records the restore, by whom, and from where");
+ok(await waitFor((m) => m.type === "tree" && m.version === restored.version && m.restoredFrom === 1 && m.renames.post === "boss"), "the WebSocket tree message carries restoredFrom and renames");
+const follow = await call("resolve", { link: `${link}#post.top,standoff` });
+ok(follow.refs[0].status === "renamed" && follow.refs[0].now === "boss.top" && follow.refs[1].now === "boss", "old links follow the undone renames");
+const again = await (await rest(`/api/models/${id}/versions/1/restore`, "POST", { baseVersion: restored.version })).json();
+ok(again.unchanged === true && again.version === restored.version, "restoring the same tree again changes nothing");
+
+// keep-all: more restores than the old 50-version window
+let at = restored.version;
+for (let i = 0; i < 50; i++) at = (await (await rest(`/api/models/${id}/versions/${i % 2 ? 1 : 2}/restore`, "POST", { baseVersion: at })).json()).version;
+const keptOld = await call("get_model", { link, version: 1 });
+const allPage = await (await rest(`/api/models/${id}/versions?limit=200`)).json();
+ok(at === restored.version + 50 && keptOld.model.version === 1 && allPage.oldest === 0 && allPage.versions.length === at + 1, `every version is kept (${at + 1} of them)`);
+
+// 12. comments pinned to refs
+const author = { id: "p-smoke-otter", name: "Quiet Otter", secret: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4" };
+const camera = { position: [120, -120, 90], target: [0, 0, 0], up: [0, 0, 1], fov: 45 };
+const c1res = await rest(`/api/models/${id}/comments`, "POST", { ref: "base.top", point: [10, 5, 6], normal: [0, 0, 2], camera, version: at, body: "Make this plate wider", author });
+const c1 = await c1res.json();
+ok(c1res.status === 201 && c1.anchor.ref === "base.top" && c1.anchor.facts?.kind === "face" && c1.anchor.facts.area > 0 && c1.target.status === "ok", `a person pins a comment to base.top (facts: area ${c1.anchor.facts?.area} mm²)`);
+ok(c1.anchor.normal.join() === "0,0,1" && c1.anchor.camera.fov === 45 && c1.anchor.version === at && !("secret" in c1.comments[0]), "the anchor keeps point, a normalized normal, the camera and the version; never the key");
+ok(await waitFor((m) => m.type === "thread" && m.thread.id === c1.id), "the WebSocket announces the thread");
+const c2res = await rest(`/api/models/${id}/comments`, "POST", { ref: null, body: "Is this printable?", author });
+const c2 = await c2res.json();
+ok(c2res.status === 201 && c2.anchor.ref === null && c2.anchor.facts === null && c2.target.status === "ok", "a whole-model comment needs no ref");
+const nope = await rest(`/api/models/${id}/comments`, "POST", { ref: "nope.top", body: "?", author });
+ok(nope.status === 400 && (await nope.json()).error.includes(`Can't pin a comment to "nope.top"`), "pinning to a ref that isn't there is a 400");
+ok((await rest(`/api/models/${id}/comments`, "POST", { ref: "base", body: "x", author: { ...author, secret: "short" } })).status === 400, "a person's comment needs their key");
+ok((await rest(`/api/models/${id}/comments`, "POST", { body: "x".repeat(4001), author })).status === 413, "an oversized comment is 413");
+const listed = await (await rest(`/api/models/${id}/comments?status=open`)).json();
+ok(listed.threads.length === 2 && listed.threads[0].id === c1.id, "GET /comments lists threads oldest first");
+
+const withComments = await call("get_model", { link });
+ok(withComments.open_comments?.count === 2 && withComments.open_comments.threads[0].pinned_to === "base.top" && withComments.open_comments.threads[1].pinned_to === "whole model", "get_model lists the open comments");
+const cLink = withComments.open_comments.threads[0].link;
+ok(cLink === `${base}/m/${id}?c=${c1.id}`, "each with its comment link");
+ok((await call("get_model", { link: cLink })).comment_in_link?.includes("resolve"), "get_model on a comment link says to resolve it");
+const rc1 = await call("resolve", { link: cLink });
+ok(rc1.comment?.comments[0].text === "Make this plate wider" && rc1.comment.pinned_to.ref === "base.top" && rc1.comment.pinned_to.status === "ok", "resolve on a comment link returns the thread");
+ok(rc1.facts?.then?.area > 0 && rc1.facts.now?.area === rc1.facts.then.area && rc1.facts.changes.length === 0 && rc1.facts.changed_since_seen === false, "and the pinned face's facts then and now");
+ok(rc1.edit_scope.join() === "base" && rc1.comment.looking_along?.length === 3 && rc1.next.includes("resolve it with comment"), "with edit_scope, the view direction, and what to do next");
+const rc2 = await call("resolve", { link: `${base}/m/${id}?c=${c2.id}` });
+ok(rc2.comment?.pinned_to.whole_model === true && rc2.refs.length === 0 && !rc2.facts, "a whole-model comment resolves without refs");
+
+await call("edit_features", { link, ops: [{ op: "rename", id: "base", to: "plate" }] });
+const rc1b = await call("resolve", { link: cLink });
+ok(rc1b.comment.pinned_to.status === "renamed" && rc1b.comment.pinned_to.now === "plate.top" && rc1b.edit_scope.join() === "plate", "after a rename the comment follows it (now plate.top)");
+ok(await waitFor((m) => m.type === "thread-targets" && m.targets[c1.id]?.ref === "plate.top" && m.targets[c1.id].status === "renamed"), "the WebSocket sends the new thread target");
+await call("edit_features", { link, ops: [{ op: "update", id: "plate", set: { size: [100, 40, 6] } }] });
+const rc1c = await call("resolve", { link: cLink });
+ok(rc1c.facts.changes.some((x) => x.field === "area") && rc1c.facts.changed_since_seen === true, "a size change shows in facts.changes (area) and changed_since_seen");
+
+const rep1res = await rest(`/api/models/${id}/comments/${c1.id}`, "POST", { body: "Also round the corners", author });
+ok(rep1res.status === 201 && (await rep1res.json()).comments.length === 2, "a person replies (201)");
+const done = await call("comment", { link: cLink, text: "Widened the plate to 100 mm.", resolve: true });
+ok(done.status === "resolved" && done.replies === 2, "the agent replies and resolves with comment");
+ok(await waitFor((m) => m.type === "thread" && m.thread.id === c1.id && m.thread.status === "resolved" && m.thread.comments.at(-1).authorKind === "agent"), "the viewer hears the agent's reply and the resolve");
+ok((await call("comment", { link: cLink, resolve: false })).status === "open", "resolve: false reopens it");
+ok((await call("comment", { link, text: "hi" }, true)).startsWith("Pass a comment link"), "comment needs a comment link");
+ok((await call("comment", { link: cLink }, true)).startsWith("Pass text"), "comment needs text or resolve");
+const first = c1.comments[0].id;
+const wrongKey = await rest(`/api/models/${id}/comments/${c1.id}/${first}`, "PATCH", { body: "edited", secret: "b".repeat(32) });
+ok(wrongKey.status === 403 && (await wrongKey.json()).error.includes("Only its author"), "editing someone else's comment is 403");
+const edited = await (await rest(`/api/models/${id}/comments/${c1.id}/${first}`, "PATCH", { body: "Make this plate much wider", secret: author.secret })).json();
+ok(edited.comments[0].body === "Make this plate much wider" && edited.comments[0].editedAt > 0, "the author edits their comment");
+const delRes = await (await rest(`/api/models/${id}/comments/${c2.id}/${c2.comments[0].id}`, "DELETE", { secret: author.secret })).json();
+ok(delRes.thread === null && (await waitFor((m) => m.type === "thread-deleted" && m.id === c2.id)), "deleting a thread's last comment deletes the thread (and the viewer hears it)");
+ok((await rest(`/api/models/${id}/comments/${c2.id}`)).status === 404, "a deleted thread is gone");
+
+const knobRes = await rest(`/api/models/${id}/comments`, "POST", { ref: "lid-knob", body: "Knob is too small", author });
+const knob = await knobRes.json();
+const removedKnob = await call("edit_features", { link, ops: [{ op: "remove", id: "lid-knob" }] });
+ok(removedKnob.warnings.some((w) => w.includes("lid-knob, which has an open comment") && w.includes(`?c=${knob.id}`)) && removedKnob.open_comments?.includes("2 open"), "removing a commented feature warns with the comment link");
+ok((await (await rest(`/api/models/${id}/comments/${knob.id}`)).json()).target.status === "removed", "the thread's target reads as removed");
+
+// 13. notes
+ok((await call("get_model", { link })).notes.version === 0, "a model starts without notes");
+const n1 = await call("write_notes", { link, markdown: "Mates with the [mounting face](#plate.top). Clearance on [the bore](#bose)." });
+ok(n1.notes_version === 1 && n1.warnings?.some((w) => w.includes("#bose") && w.includes("did you mean boss")), "write_notes saves v1 and warns about a typo'd ref");
+ok(await waitFor((m) => m.type === "notes" && m.notes.version === 1 && m.notes.updatedByKind === "agent"), "the viewer hears the notes");
+ok((await call("write_notes", { link, markdown: "overwrite" }, true)).includes("already has notes (v1"), "writing over notes without base_version is refused");
+const staleNotes = await rest(`/api/models/${id}/notes`, "PUT", { body: "x", baseVersion: 0, by: "Quiet Otter" });
+ok(staleNotes.status === 409 && (await staleNotes.json()).error.startsWith("Version conflict"), "a person's stale notes save is 409");
+const personNotes = "PETG, 0.2 mm layers.\r\n\r\nSee [the top](#base.top) and [knob](#lid-knob).   ";
+const n2 = await (await rest(`/api/models/${id}/notes`, "PUT", { body: personNotes, baseVersion: 1, by: "Quiet Otter" })).json();
+ok(n2.version === 2 && n2.updatedBy === "Quiet Otter" && n2.body === "PETG, 0.2 mm layers.\n\nSee [the top](#base.top) and [knob](#lid-knob).", "a person saves notes (CRLF and trailing space normalized)");
+const gm = await call("get_model", { link });
+ok(gm.notes.markdown === n2.body && gm.notes.version === 2 && gm.notes.updated_by === "Quiet Otter", "get_model returns the notes");
+const staleRefs = gm.notes.stale_refs ?? [];
+ok(staleRefs.some((r) => r.ref === "base.top" && r.now === "plate.top") && staleRefs.some((r) => r.ref === "lid-knob" && r.removed_in > 0), "and the refs in them that were renamed or removed");
+ok((await call("write_notes", { link, markdown: n2.body, base_version: 2 })).notes_version === 2, "writing identical notes is a no-op");
+
+// 14. trash
 ok((await rest(`/api/models/${id}`, "DELETE")).ok && (await rest(`/api/models/${id}`)).status === 410, "a deleted model reads as gone (410)");
 const deleted = await call("get_model", { link }, true);
 ok(deleted.includes("was deleted") && deleted.includes("restore it from the viewer"), "the agent hears a deleted model can be restored");
@@ -221,6 +355,7 @@ ok(messages.some((m) => m.type === "model-deleted") && messages.some((m) => m.ty
 
 const nobody = "zzzzzzzzzzzzzz";
 ok((await call("get_model", { link: `${base}/m/${nobody}` }, true)).startsWith("Model not found"), "an unknown model is not found");
+ok((await rest(`/api/models/${nobody}/comments`)).status === 404 && (await rest(`/api/models/${nobody}/notes`)).status === 404, "comments and notes of an unknown model are 404");
 ok((await rest(`/api/models/${nobody}`)).status === 404, "and looking it up created nothing");
 
 ws.close();

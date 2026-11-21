@@ -4,24 +4,26 @@ import type { Env } from "./index.ts";
  * Product analytics in Workers Analytics Engine (dataset infinite_cad_events).
  * Every event uses the same columns so one query shape fits all of them:
  *
- *   blob1 event    "tool" | "connect" | "session" | "create" | "trash"
+ *   blob1 event    "tool" | "connect" | "session" | "create" | "trash" | "comment" | "notes" | "history"
  *   blob2 name     tool name · MCP client name · "viewer" · "web"
  *                  · trash "model-delete" | "model-restore" (people in the viewer)
+ *                  · comment "create" | "reply" | "resolve" | "reopen" | "edit" | "delete" (people in the viewer)
+ *                  · notes "edit" · history "restore"
  *   blob3 model    hashed model id ("" when there is none)
- *   blob4 actor    MCP client (User-Agent product) · anonymous viewer id (sessions)
- *   blob5 detail   tool outcome/variant · device class
+ *   blob4 actor    MCP client (User-Agent product) · anonymous viewer id (sessions, comments, notes, restores)
+ *   blob5 detail   tool outcome/variant · device class · "person" (comments, notes, restores)
  *   blob6 country
  *   double1 ms     tool latency · session length
- *   double2        tree bytes written · ref count resolved · engaged ms
+ *   double2        tree bytes written · ref count resolved · engaged ms · notes length
  *   double3        warnings (build errors, unknown refs)
  *   index1         hashed model id, so sampling (if it ever kicks in) is per model
  *
  * Model ids are capability URLs (anyone with one can edit), so they are hashed
- * before they're written. Trees, feature ids and refs are never recorded: ids are
- * descriptive and can say what someone is building.
+ * before they're written. Trees, feature ids, refs, comment text and notes are never
+ * recorded: ids and words are descriptive and can say what someone is building.
  */
 export interface AnalyticsEvent {
-  event: "tool" | "connect" | "session" | "create" | "trash";
+  event: "tool" | "connect" | "session" | "create" | "trash" | "comment" | "notes" | "history";
   name: string;
   modelId?: string;
   actor?: string;

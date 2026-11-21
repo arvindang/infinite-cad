@@ -1,3 +1,5 @@
+import type { CommentAuthorIn } from "../src/collab.ts";
+
 export const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) =>
   root.querySelector(sel) as T;
 
@@ -46,14 +48,70 @@ export const prefs = {
   },
 };
 
+const token = (n: number) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("");
+
 /** Anonymous random id for counting viewers; nothing personal goes into it. */
 export function viewerId(): string {
   let id = prefs.get<string>("viewer", "");
   if (!/^[a-z0-9]{16}$/.test(id)) {
-    id = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("");
+    id = token(16);
     prefs.set("viewer", id);
   }
   return id;
+}
+
+/** Phone layout: narrow or touch. No hover-only UI; panels become bottom sheets. */
+export const isPhone = () => matchMedia("(max-width: 820px)").matches || matchMedia("(pointer: coarse)").matches;
+
+const ADJECTIVES = [
+  "Curious", "Sleepy", "Brave", "Fuzzy", "Jolly", "Nimble", "Quiet", "Sunny", "Witty", "Zesty", "Breezy", "Cosmic",
+  "Dapper", "Eager", "Fancy", "Gentle", "Humble", "Lucky", "Merry", "Plucky", "Rapid", "Snappy", "Spry", "Tidy",
+  "Velvet", "Wobbly", "Bouncy", "Chipper", "Crafty", "Dreamy", "Fearless", "Giddy", "Hasty", "Keen", "Lively",
+  "Mellow", "Peppy", "Quirky", "Rosy", "Sparkly", "Swift", "Thrifty", "Upbeat", "Vivid", "Whimsical", "Zany",
+];
+const ANIMALS = [
+  "Capybara", "Otter", "Narwhal", "Axolotl", "Pangolin", "Quokka", "Platypus", "Hedgehog", "Lemur", "Puffin",
+  "Wombat", "Ocelot", "Alpaca", "Badger", "Chinchilla", "Dingo", "Ferret", "Gecko", "Heron", "Ibis", "Jackal",
+  "Koala", "Llama", "Marmot", "Newt", "Okapi", "Penguin", "Raccoon", "Salamander", "Tapir", "Walrus", "Yak",
+  "Zebra", "Armadillo", "Beaver", "Cheetah", "Dolphin", "Flamingo", "Gibbon", "Hamster", "Kiwi", "Manatee",
+  "Mongoose", "Owl", "Panda", "Seal", "Sloth", "Toucan",
+];
+const pick = <T,>(list: T[]) => list[crypto.getRandomValues(new Uint32Array(1))[0] % list.length];
+
+/**
+ * Who you are on comments, without accounts: a random id and a funny name kept in this browser.
+ * `secret` never leaves except to prove a comment is yours when you edit or delete it.
+ * Clearing storage or switching device makes you someone new.
+ */
+export type Commenter = CommentAuthorIn;
+export function commenter(): Commenter {
+  let me = prefs.get<Commenter | null>("commenter", null);
+  if (!me || !/^[a-z0-9]{16}$/.test(me.id) || !/^[a-z0-9]{32}$/.test(me.secret) || !me.name) {
+    me = { id: token(16), secret: token(32), name: `${pick(ADJECTIVES)} ${pick(ANIMALS)}` };
+    prefs.set("commenter", me);
+  }
+  return me;
+}
+export function renameCommenter(name: string): Commenter {
+  const me = { ...commenter(), name: name.replace(/\s+/g, " ").trim().slice(0, 40) || commenter().name };
+  prefs.set("commenter", me);
+  return me;
+}
+/** A steady color per author, so the same person reads the same everywhere. */
+export function authorColor(id: string) {
+  let h = 0;
+  for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return `hsl(${h % 360} 58% 46%)`;
+}
+/** "now", "5m", "3h", "2d", then a date. long: "just now", "5m ago", … */
+export function ago(ts: number, long = false) {
+  const s = (Date.now() - ts) / 1000;
+  const sfx = long ? " ago" : "";
+  if (s < 60) return long ? "just now" : "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m${sfx}`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h${sfx}`;
+  if (s < 86400 * 7) return `${Math.floor(s / 86400)}d${sfx}`;
+  return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 export interface Recent {

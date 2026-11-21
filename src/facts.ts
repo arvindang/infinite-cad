@@ -3,7 +3,8 @@
 
 import type { BodyMesh, BuildResult } from "./geometry.ts";
 import { apply, localFaceFrame } from "./geometry.ts";
-import { type CadDoc, type Feature, type Vec3, formatRef, parseRef, planarRoles, rolesOf } from "./schema.ts";
+import type { FactChange, FactsSnapshot } from "./collab.ts";
+import { type CadDoc, type Feature, type Vec3, defaultOp, formatRef, instanceCount, parseRef, planarRoles, rolesOf } from "./schema.ts";
 
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 const rv = (v: number[]) => v.map(r3) as Vec3;
@@ -230,3 +231,64 @@ export function resolve(doc: CadDoc, res: BuildResult, facts: FactIndex, refStr:
 }
 
 const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+// ---------- snapshots (comment anchors) ----------
+
+type Box = { min: Vec3; max: Vec3 } | null | undefined;
+
+/** The measured facts of a resolved ref, small enough to keep with a comment. Null for an unknown ref. */
+export function snapshotFacts(r: Resolved): FactsSnapshot | null {
+  const x = r as Record<string, any>;
+  const keep = (o: FactsSnapshot): FactsSnapshot => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as FactsSnapshot;
+  if (r.kind === "unknown") return null;
+  if (r.kind === "part") {
+    return keep({
+      kind: "part", source: "kernel", presence: x.exists ? "present" : "consumed",
+      volume: x.volume, surfaceArea: x.surfaceArea, genus: x.genus, bbox: (x.bbox as Box) ?? null, size: x.size ?? undefined,
+    });
+  }
+  if (r.kind === "feature") {
+    const faces = x.faces as { present: boolean }[];
+    return keep({
+      kind: "feature", source: "kernel", presence: x.status, type: x.type, part: x.part, op: x.op, instances: x.instances,
+      facesPresent: `${faces.filter((f) => f.present).length}/${faces.length}`, bbox: (x.bbox as Box) ?? null,
+    });
+  }
+  return keep({
+    kind: "face", source: "kernel", presence: x.status, part: x.part, surface: x.surface,
+    area: x.area, centroid: x.centroid, normal: x.normal, planeOffset: x.planeOffset, bbox: x.bbox, size: x.size,
+  });
+}
+
+/** What can be said about a ref from the source alone, when the kernel can't run. Null if it isn't in the tree. */
+export function sourceSnapshot(doc: CadDoc, ref: string): FactsSnapshot | null {
+  const r = parseRef(ref);
+  if (!r) return null;
+  if (doc.parts.some((p) => p.id === r.id)) return { kind: "part", source: "none" };
+  for (const p of doc.parts) {
+    const i = p.features.findIndex((f) => f.id === r.id);
+    if (i < 0) continue;
+    const f = p.features[i];
+    return { kind: r.role ? "face" : "feature", source: "none", type: f.type, part: p.id, op: defaultOp(f, i), instances: instanceCount(f.pattern) };
+  }
+  return null;
+}
+
+const TOL = 1e-3;
+function same(a: unknown, b: unknown): boolean {
+  if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) <= TOL * Math.max(1, Math.abs(a), Math.abs(b));
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => same(v, b[i]));
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    return [...keys].every((k) => same((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+  }
+  return a === b;
+}
+
+/** Fields that differ between two snapshots (numbers within 1e-3 relative count as equal). With different sources, only fields both have. */
+export function compareFacts(then: FactsSnapshot, now: FactsSnapshot): FactChange[] {
+  const t = then as unknown as Record<string, unknown>, n = now as unknown as Record<string, unknown>;
+  const both = then.source === now.source;
+  const keys = [...new Set([...Object.keys(t), ...Object.keys(n)])].filter((k) => k !== "source" && (both || (k in t && k in n)));
+  return keys.filter((k) => !same(t[k], n[k])).map((k) => ({ field: k, then: t[k] ?? null, now: n[k] ?? null }));
+}

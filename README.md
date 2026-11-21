@@ -22,10 +22,10 @@ Deploy to Cloudflare (Workers Paid: the kernel needs more than the free plan's 1
 
 ```sh
 npx wrangler login
-npm run deploy       # prints https://infinite-cad.<you>.workers.dev
+npm run deploy       # serves https://infinitecad.app (and the workers.dev URL)
 ```
 
-Then in Claude: **Settings → Connectors → Add custom connector** → `https://infinite-cad.<you>.workers.dev/mcp`. Claude Code can use localhost directly:
+Then in Claude: **Settings → Connectors → Add custom connector** → `https://infinitecad.app/mcp`. Claude Code can use localhost directly:
 
 ```sh
 claude mcp add --transport http infinite-cad http://localhost:8787/mcp

@@ -61,6 +61,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   const url = new URL(request.url);
   const path = url.pathname;
 
+  // 308 keeps the method and body, so MCP POSTs to www survive the redirect
+  if (url.hostname === "www.infinitecad.app") {
+    url.hostname = "infinitecad.app";
+    return Response.redirect(url.toString(), 308);
+  }
+
   if (path === "/mcp" || path.startsWith("/mcp/")) return handleMcp(request, env, ctx);
 
   // Viewer page for /m/<model>; the #refs and ?v= are read client-side

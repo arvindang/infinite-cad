@@ -10,6 +10,15 @@ The agent calls `resolve` on that link and gets exactly what you meant (the feat
 
 No sketcher, no constraint solver, no mouse modelling on purpose. The viewer renders and links; the model designs.
 
+Live: https://infinitecad.app · MCP at `https://infinitecad.app/mcp` (the original `infinite-cad.arvindang.workers.dev` still works; `www` redirects to the apex)
+
+## Try it
+
+1. In Claude: **Settings → Connectors → Add custom connector** → `https://infinitecad.app/mcp`. In Claude Code: `claude mcp add --transport http infinite-cad https://infinitecad.app/mcp`.
+2. Ask for a part: "Make an 80×40×6 mm wall bracket with two M4 mounting holes and a 16 mm boss." The agent returns a link; open it and watch the model build.
+3. Click a face, press ⌘C, and paste the link back with what to change: "…#base.top put two more holes here, 20 mm apart." The agent resolves the link and edits just that feature.
+4. Export STL or 3MF to print, or STEP (exact solids) to keep going in your CAD tool.
+
 ## Run it
 
 ```sh
@@ -101,3 +110,11 @@ Viewer (web/) ──► /api/models/:id/...  ──►  CadModel Durable Object 
 ## Analytics
 
 Events go to Workers Analytics Engine (dataset `infinite_cad_events`, layout in `src/analytics.ts`): MCP tool calls (outcome, latency, sizes, warning counts), MCP client connects, models created from the web, trash actions, comment actions (create, reply, resolve, reopen, edit, delete), notes edits (with their length), version restores, and one event per viewer connection with an anonymous viewer id and time open. Model ids are hashed before they're written; trees, feature ids, refs, comment text and notes are never recorded.
+
+## Not built yet
+
+Auth (model ids are unguessable capability URLs for now; anyone with a link can edit, comment or delete) · per-feature claims · cross-part booleans · fillets and chamfers · server-side export (every export runs in the browser).
+
+## License
+
+[FSL-1.1-ALv2](LICENSE.md). Use, modify and self-host it for anything except a competing hosted service; each version becomes Apache 2.0 two years after it's released.

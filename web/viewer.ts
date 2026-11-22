@@ -392,47 +392,86 @@ function setView(k: string) {
   closeViewMenu();
   toast(VIEW_NAMES[k], 700);
 }
-// ---------- axis triad: X red, Y green, Z blue (as in CAM), turning with the camera ----------
+// ---------- view cube + axis triad: X red, Y green, Z blue (as in CAM), turning with the camera ----------
 const SVG_NS = "http://www.w3.org/2000/svg";
+const svgEl = <K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string> = {}) => {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+};
+const CUBE = 14; // half size
+const AXIS_LEN = 2 * CUBE + 20; // axes run from the cube's -X -Y -Z corner along its edges, then out past it
+const CORNER = new THREE.Vector3(-CUBE, -CUBE, -CUBE);
+const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
 const TRIAD = [
-  { axis: new THREE.Vector3(1, 0, 0), name: "X", color: "#e5484d", views: ["4", "3"] },
-  { axis: new THREE.Vector3(0, 1, 0), name: "Y", color: "#30a46c", views: ["2", "1"] },
-  { axis: new THREE.Vector3(0, 0, 1), name: "Z", color: "#3e7bfa", views: ["5", "6"] },
-].flatMap(({ axis, name, color, views }) => [1, -1].map((sign, i) => {
-  const g = document.createElementNS(SVG_NS, "g");
-  g.classList.add("end");
-  if (sign < 0) g.classList.add("neg");
-  g.dataset.triadView = views[i];
-  const title = document.createElementNS(SVG_NS, "title");
-  title.textContent = `${sign > 0 ? "+" : "−"}${name}: look from ${VIEW_NAMES[views[i]].toLowerCase()} (${views[i]})`;
-  const line = document.createElementNS(SVG_NS, "line");
-  line.setAttribute("stroke", color);
-  if (sign < 0) line.setAttribute("stroke-opacity", "0.3");
-  const dot = document.createElementNS(SVG_NS, "circle");
-  dot.setAttribute("r", sign > 0 ? "9" : "6");
-  dot.setAttribute("fill", color);
-  const label = document.createElementNS(SVG_NS, "text");
-  label.textContent = sign > 0 ? name : `−${name}`;
-  g.append(title, dot, label);
-  return { dir: axis.clone().multiplyScalar(sign), g, line, dot, label };
-}));
+  { axis: V(1, 0, 0), name: "X", color: "#e5484d", faces: ["1", "6"] },
+  { axis: V(0, 1, 0), name: "Y", color: "#30a46c", faces: ["3", "6"] },
+  { axis: V(0, 0, 1), name: "Z", color: "#3e7bfa", faces: ["3", "1"] },
+].map(({ axis, name, color, faces }) => {
+  const g = svgEl("g", { class: "end" });
+  const title = svgEl("title");
+  title.textContent = `+${name}`;
+  const label = svgEl("text");
+  label.textContent = name;
+  g.append(title, svgEl("circle", { r: "7.5", fill: color }), label);
+  return { axis, faces, g, line: svgEl("line", { stroke: color }) };
+});
+// each face as seen from outside: its normal, and the directions that read as right and up on it
+const FACES = [
+  { view: "1", n: V(0, -1, 0), u: V(1, 0, 0), v: V(0, 0, 1) },
+  { view: "2", n: V(0, 1, 0), u: V(-1, 0, 0), v: V(0, 0, 1) },
+  { view: "3", n: V(-1, 0, 0), u: V(0, -1, 0), v: V(0, 0, 1) },
+  { view: "4", n: V(1, 0, 0), u: V(0, 1, 0), v: V(0, 0, 1) },
+  { view: "5", n: V(0, 0, 1), u: V(1, 0, 0), v: V(0, 1, 0) },
+  { view: "6", n: V(0, 0, -1), u: V(1, 0, 0), v: V(0, -1, 0) },
+].map((f) => {
+  const g = svgEl("g", { class: "face", "data-triad-view": f.view });
+  const title = svgEl("title");
+  title.textContent = `${VIEW_NAMES[f.view]} (${f.view})`;
+  const poly = svgEl("polygon");
+  const label = svgEl("text");
+  label.textContent = VIEW_NAMES[f.view].toUpperCase();
+  g.append(title, poly, label);
+  return { ...f, g, poly, label };
+});
 const triadSvg = document.querySelector<SVGSVGElement>("#triad")!;
 const triadQ = new THREE.Quaternion();
-const triadV = new THREE.Vector3();
+const triadInv = new THREE.Quaternion();
+/** World direction to the triad's screen (x right, y down) and depth (toward the eye). */
+const toTriad = (w: THREE.Vector3) => {
+  const p = w.clone().applyQuaternion(triadInv);
+  return { x: p.x, y: -p.y, z: p.z };
+};
 function updateTriad() {
   if (triadQ.equals(camera.quaternion)) return;
   triadQ.copy(camera.quaternion);
-  const inv = camera.quaternion.clone().invert();
-  const R = 32;
-  const placed = TRIAD.map((t) => {
-    triadV.copy(t.dir).applyQuaternion(inv); // view space: x right, y up, z toward the eye
-    const x = triadV.x * R, y = -triadV.y * R;
-    t.line.setAttribute("x1", "0"); t.line.setAttribute("y1", "0");
-    t.line.setAttribute("x2", String(x)); t.line.setAttribute("y2", String(y));
-    t.g.setAttribute("transform", `translate(${x} ${y})`);
-    return { t, z: triadV.z };
-  }).sort((a, b) => a.z - b.z); // far first, near on top
-  triadSvg.replaceChildren(...placed.map((p) => p.t.line), ...placed.map((p) => p.t.g));
+  triadInv.copy(camera.quaternion).invert();
+  // only the faces turned toward you; a label is drawn in its face's plane
+  const faces: Element[] = [];
+  const shown = new Set<string>();
+  for (const f of FACES) {
+    const n = toTriad(f.n), u = toTriad(f.u), v = toTriad(f.v);
+    if (n.z < 0.02) continue;
+    shown.add(f.view);
+    const c = { x: n.x * CUBE, y: n.y * CUBE };
+    const corner = (a: number, b: number) => `${c.x + (u.x * a + v.x * b) * CUBE},${c.y + (u.y * a + v.y * b) * CUBE}`;
+    f.poly.setAttribute("points", [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)].join(" "));
+    f.label.setAttribute("transform", `matrix(${u.x} ${u.y} ${-v.x} ${-v.y} ${c.x} ${c.y})`);
+    f.g.style.setProperty("--shade", String(0.55 + 0.45 * n.z));
+    faces.push(f.g);
+  }
+  // an axis edge shows when a face beside it does; its labelled end always shows
+  const behind: Element[] = [], front: Element[] = [];
+  const o = toTriad(CORNER);
+  for (const t of TRIAD) {
+    const e = toTriad(CORNER.clone().addScaledVector(t.axis, AXIS_LEN));
+    t.line.setAttribute("x1", String(o.x)); t.line.setAttribute("y1", String(o.y));
+    t.line.setAttribute("x2", String(e.x)); t.line.setAttribute("y2", String(e.y));
+    t.g.setAttribute("transform", `translate(${e.x} ${e.y})`);
+    (t.faces.some((k) => shown.has(k)) ? front : behind).push(t.line);
+    front.push(t.g);
+  }
+  triadSvg.replaceChildren(...behind, ...faces, ...front);
 }
 triadSvg.addEventListener("click", (e) => {
   const k = (e.target as Element).closest<SVGGElement>("[data-triad-view]")?.dataset.triadView;

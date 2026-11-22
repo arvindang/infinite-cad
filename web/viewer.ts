@@ -4,7 +4,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { type Body, disposeBody, toBody } from "./mesh";
 import { type ExportFormat, FORMATS, exportBodies } from "./export";
-import { type Dim, DimLayer, type Unit, UNITS, boxDims, faceDims } from "./measure";
+import { type Dim, DimLayer, type Unit, UNITS, boxDims, faceDims, pitchCircle } from "./measure";
 import type { BuildReply, BuildRequest } from "./kernel-worker";
 import type { StepReply, StepRequest } from "./step-worker";
 import { parseRef, type CadDoc, type Ref, type Vec3 } from "../src/schema.ts";
@@ -65,10 +65,14 @@ const canvas = $<HTMLCanvasElement>("#view");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100000);
-camera.up.set(0, 0, 1); // CAD: Z up, mm
-camera.position.set(120, -160, 110);
-const controls = new OrbitControls(camera, canvas);
+const persp = new THREE.PerspectiveCamera(30, 1, 0.1, 100000);
+// Orthographic shares the pose: its frustum is what the perspective one shows at the target, and a
+// zoom is folded back into the distance every frame (zoom stays 1), so fit, poses and links don't care which is on.
+const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -100000, 100000);
+for (const c of [persp, ortho]) c.up.set(0, 0, 1); // CAD: Z up, mm
+persp.position.set(120, -160, 110);
+let camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = persp;
+const controls = new OrbitControls(camera as THREE.Camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.15;
 controls.screenSpacePanning = true;
@@ -77,7 +81,7 @@ scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a90, 1.4));
 const headlight = new THREE.DirectionalLight(0xffffff, 1.6);
 headlight.position.set(0.4, 0.6, 1); // follows the camera: whatever you look at is lit
 camera.add(headlight);
-scene.add(camera);
+scene.add(persp, ortho);
 const material = new THREE.MeshStandardMaterial({
   vertexColors: true, roughness: 0.85, metalness: 0,
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, // lines sit on top
@@ -361,7 +365,7 @@ function fitBox(box: THREE.Box3, dir?: THREE.Vector3) {
   if (box.isEmpty()) return;
   const sphere = box.getBoundingSphere(new THREE.Sphere());
   const r = Math.max(sphere.radius, 3);
-  const fov = THREE.MathUtils.degToRad(camera.fov);
+  const fov = THREE.MathUtils.degToRad(persp.fov);
   const hfov = 2 * Math.atan(Math.tan(fov / 2) * visibleAspect);
   const dist = (r / Math.sin(Math.min(fov, hfov) / 2)) * 1.25;
   const d = (dir ?? camera.position.clone().sub(controls.target)).normalize();
@@ -382,10 +386,90 @@ function markView(k: string | null) {
   document.querySelectorAll<HTMLElement>("#viewMenu [data-view]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.view === k)));
 }
 function setView(k: string) {
+  if (k !== "7") setOrtho(true); // a view normal to a plane is only flat without perspective
   fitAll(new THREE.Vector3(...VIEWS[k]));
   markView(k);
   closeViewMenu();
   toast(VIEW_NAMES[k], 700);
+}
+// ---------- axis triad: X red, Y green, Z blue (as in CAM), turning with the camera ----------
+const SVG_NS = "http://www.w3.org/2000/svg";
+const TRIAD = [
+  { axis: new THREE.Vector3(1, 0, 0), name: "X", color: "#e5484d", views: ["4", "3"] },
+  { axis: new THREE.Vector3(0, 1, 0), name: "Y", color: "#30a46c", views: ["2", "1"] },
+  { axis: new THREE.Vector3(0, 0, 1), name: "Z", color: "#3e7bfa", views: ["5", "6"] },
+].flatMap(({ axis, name, color, views }) => [1, -1].map((sign, i) => {
+  const g = document.createElementNS(SVG_NS, "g");
+  g.classList.add("end");
+  if (sign < 0) g.classList.add("neg");
+  g.dataset.triadView = views[i];
+  const title = document.createElementNS(SVG_NS, "title");
+  title.textContent = `${sign > 0 ? "+" : "−"}${name}: look from ${VIEW_NAMES[views[i]].toLowerCase()} (${views[i]})`;
+  const line = document.createElementNS(SVG_NS, "line");
+  line.setAttribute("stroke", color);
+  if (sign < 0) line.setAttribute("stroke-opacity", "0.3");
+  const dot = document.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("r", sign > 0 ? "9" : "6");
+  dot.setAttribute("fill", color);
+  const label = document.createElementNS(SVG_NS, "text");
+  label.textContent = sign > 0 ? name : `−${name}`;
+  g.append(title, dot, label);
+  return { dir: axis.clone().multiplyScalar(sign), g, line, dot, label };
+}));
+const triadSvg = document.querySelector<SVGSVGElement>("#triad")!;
+const triadQ = new THREE.Quaternion();
+const triadV = new THREE.Vector3();
+function updateTriad() {
+  if (triadQ.equals(camera.quaternion)) return;
+  triadQ.copy(camera.quaternion);
+  const inv = camera.quaternion.clone().invert();
+  const R = 32;
+  const placed = TRIAD.map((t) => {
+    triadV.copy(t.dir).applyQuaternion(inv); // view space: x right, y up, z toward the eye
+    const x = triadV.x * R, y = -triadV.y * R;
+    t.line.setAttribute("x1", "0"); t.line.setAttribute("y1", "0");
+    t.line.setAttribute("x2", String(x)); t.line.setAttribute("y2", String(y));
+    t.g.setAttribute("transform", `translate(${x} ${y})`);
+    return { t, z: triadV.z };
+  }).sort((a, b) => a.z - b.z); // far first, near on top
+  triadSvg.replaceChildren(...placed.map((p) => p.t.line), ...placed.map((p) => p.t.g));
+}
+triadSvg.addEventListener("click", (e) => {
+  const k = (e.target as Element).closest<SVGGElement>("[data-triad-view]")?.dataset.triadView;
+  if (k) setView(k);
+});
+
+// ---------- projection: perspective or orthographic, same pose ----------
+let orthoOn = false;
+function setOrtho(on: boolean) {
+  if (on === orthoOn) return;
+  orthoOn = on;
+  const next = on ? ortho : persp;
+  next.position.copy(camera.position);
+  next.quaternion.copy(camera.quaternion);
+  next.add(headlight);
+  camera = next;
+  controls.object = camera;
+  resize();
+  controls.update();
+  $("#orthoBtn").setAttribute("aria-pressed", String(on));
+  $("#orthoLabel").textContent = on ? "Ortho" : "Persp";
+}
+/** Ortho: fold any zoom back into the distance, then size the frustum to what perspective would show at the target. */
+const offset = new THREE.Vector3();
+function syncOrtho() {
+  if (camera !== ortho) return;
+  offset.subVectors(ortho.position, controls.target);
+  if (ortho.zoom !== 1) {
+    offset.setLength(THREE.MathUtils.clamp(offset.length() / ortho.zoom, 0.5, 50000));
+    ortho.position.addVectors(controls.target, offset);
+    ortho.zoom = 1;
+  }
+  const h = offset.length() * Math.tan(THREE.MathUtils.degToRad(persp.fov / 2));
+  const w = h * persp.aspect;
+  if (ortho.top === h && ortho.right === w) return;
+  Object.assign(ortho, { top: h, bottom: -h, left: -w, right: w });
+  ortho.updateProjectionMatrix();
 }
 // orbiting away from a named view drops its name from the menu button
 controls.addEventListener("end", () => {
@@ -833,16 +917,74 @@ function dimsOfRefs(refs: string[], priority: number): Dim[] {
   });
   return [...boxDims(boxOfRefs(refs), modelGap(), priority), ...round];
 }
-/** Nothing selected: every part. A selection: only what's selected (a face's own dimensions). */
+/** Area-weighted center of some face refs' triangles (the same for every copy of a patterned instance). */
+function centroidOf(refs: string[]): THREE.Vector3 | null {
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3();
+  const sum = new THREE.Vector3();
+  let area = 0;
+  for (const ref of refs) {
+    const info = refInfo.get(ref);
+    if (!info) continue;
+    const pos = info.body.mesh.geometry.attributes.position.array as Float32Array;
+    const { start, count } = info.body.range[info.index];
+    for (let i = start; i < start + count; i += 3) {
+      a.fromArray(pos, i * 3); b.fromArray(pos, i * 3 + 3); c.fromArray(pos, i * 3 + 6);
+      const ar = n.subVectors(c, b).cross(b.clone().sub(a)).length() / 2;
+      sum.addScaledVector(a.add(b).add(c), ar / 3);
+      area += ar;
+    }
+  }
+  return area > 1e-9 ? sum.divideScalar(area) : null;
+}
+/** The pitch circle of each circular pattern (of the given features, else all), from where its instances landed. */
+function pitchDims(ids?: Set<string>): Dim[] {
+  const out: Dim[] = [];
+  for (const p of doc.parts) for (const f of p.features) {
+    const n = f.pattern?.circular?.count ?? 0;
+    if (n < 2 || (ids && !ids.has(f.id))) continue;
+    const centers: THREE.Vector3[] = [];
+    for (let i = 1; i <= n; i++) {
+      const c = centroidOf(expand(`${f.id}:${i}`));
+      if (c) centers.push(c);
+    }
+    const d = centers.length === n ? pitchCircle(centers) : null;
+    if (d) out.push(d);
+  }
+  return out;
+}
+/** Features the selection touches: a part counts as all of its features. */
+function selectedFeatures(): Set<string> {
+  const ids = new Set<string>();
+  for (const key of selection) {
+    if (partIds.has(key)) doc.parts.find((p) => p.id === key)?.features.forEach((f) => ids.add(f.id));
+    else if (parseRef(key)) ids.add(parseRef(key)!.id);
+  }
+  return ids;
+}
+/**
+ * Measuring: every part, or only what's selected (a face's own dimensions), with pattern pitch circles.
+ * Not measuring: only the pitch circle of a selected circular pattern (or one of its instances or faces).
+ */
+let dimsShown = false;
 function refreshDims() {
-  if (!measuring) return;
-  const dims: Dim[] = !selection.length
-    ? bodies.flatMap((b) => dimsOfRefs(b.refs, 3))
-    : selection.flatMap((key) => {
-      const refs = expand(key);
-      if (refs.length === 1) return dimsOfFace(refs[0]).dims;
-      return refs.length ? dimsOfRefs(refs, 4) : [];
-    });
+  const pitch = selection.length ? pitchDims(selectedFeatures()) : measuring ? pitchDims() : [];
+  const dims: Dim[] = !measuring ? pitch : [
+    ...(!selection.length
+      ? bodies.flatMap((b) => dimsOfRefs(b.refs, 3))
+      : selection.flatMap((key) => {
+        const refs = expand(key);
+        if (refs.length === 1) return dimsOfFace(refs[0]).dims;
+        return refs.length ? dimsOfRefs(refs, 4) : [];
+      })),
+    ...pitch,
+  ];
+  const was = dimsShown;
+  dimsShown = dims.length > 0;
+  $("#dims").hidden = !dimsShown;
+  if (!dimsShown) {
+    if (was) dimLayer.clear(), (needsRender = true);
+    return;
+  }
   const gap = modelGap();
   dimLayer.setColor(pal().dim);
   dimLayer.set(dims, unit, gap * 0.35);
@@ -850,15 +992,13 @@ function refreshDims() {
   needsRender = true;
 }
 function placeDims() {
-  if (measuring) dimLayer.place(camera, canvas.clientWidth, canvas.clientHeight);
+  if (dimsShown) dimLayer.place(camera, canvas.clientWidth, canvas.clientHeight);
 }
 function setMeasuring(on: boolean) {
   measuring = on;
-  $("#dims").hidden = !on;
   $("#measureBtn").setAttribute("aria-pressed", String(on));
-  $("#unitBtn").hidden = !on;
-  if (on) refreshDims();
-  else dimLayer.clear();
+  $("#unitBtn").classList.toggle("muted", !on); // always there, so turning Measure on doesn't shift the bar
+  refreshDims();
   renderSelBar();
   needsRender = true;
 }
@@ -1090,6 +1230,7 @@ $("#viewSheet").addEventListener("click", (e) => {
 $("#fitBtn").addEventListener("click", () => (fitSelectionOrAll(), closeViewMenu()));
 $("#xrayBtn").addEventListener("click", () => setXray(!xray));
 $("#measureBtn").addEventListener("click", () => setMeasuring(!measuring));
+$("#orthoBtn").addEventListener("click", () => setOrtho(!orthoOn));
 $("#unitBtn").addEventListener("click", cycleUnit);
 $("#treeBtn").addEventListener("click", () => setTreeOpen(!document.body.classList.contains("tree-open")));
 $("#themeBtn").addEventListener("click", () => setTheme(theme === "light" ? "dark" : "light"));
@@ -1125,6 +1266,7 @@ addEventListener("keydown", (e) => {
   else if (!e.shiftKey && VIEWS[e.key]) setView(e.key);
   else if (e.code === "KeyF") fitSelectionOrAll();
   else if (e.code === "KeyX") setXray(!xray);
+  else if (e.code === "KeyP") setOrtho(!orthoOn), toast(orthoOn ? "Orthographic" : "Perspective", 700);
   else if (e.code === "KeyM") setMeasuring(!measuring);
   else if (e.code === "KeyU") cycleUnit();
   else if (e.code === "KeyB" && e.shiftKey) toggleAllFeatures();
@@ -1151,17 +1293,21 @@ function resize() {
   document.body.style.setProperty("--right-inset", `${R}px`);
   if (split) {
     // each half gets its own viewport (renderSplit), so no offset
-    camera.clearViewOffset();
-    camera.aspect = split.dir === "h" ? (w - L - R) / 2 / h : (w - L - R) / (h / 2);
-    visibleAspect = camera.aspect;
+    for (const c of [persp, ortho]) c.clearViewOffset();
+    persp.aspect = split.dir === "h" ? (w - L - R) / 2 / h : (w - L - R) / (h / 2);
+    visibleAspect = persp.aspect;
   } else {
     const d = Math.abs(L - R);
-    if (!d) camera.clearViewOffset();
-    else camera.setViewOffset(w + d, h, L >= R ? 0 : d, 0, w, h);
-    camera.aspect = (w + d) / h;
+    for (const c of [persp, ortho]) {
+      if (!d) c.clearViewOffset();
+      else c.setViewOffset(w + d, h, L >= R ? 0 : d, 0, w, h);
+    }
+    persp.aspect = (w + d) / h;
     visibleAspect = (w - L - R) / h;
   }
-  camera.updateProjectionMatrix();
+  persp.updateProjectionMatrix();
+  ortho.top = 0; // re-size the frustum to the new aspect
+  syncOrtho();
   needsRender = true;
   emit("resize");
 }
@@ -1197,10 +1343,12 @@ function loop(now: number) {
   stepFlash(now);
   stepPulse(now);
   controls.update();
+  syncOrtho();
   if (needsRender) {
     needsRender = false;
     if (split) renderSplit(split);
     else renderer.render(scene, camera);
+    updateTriad();
     placeDims();
     emit("render");
   }
@@ -1299,8 +1447,8 @@ const host: ViewerHost = {
   setHover,
   pickHit,
   lastHit: () => lastHitV,
-  three: { renderer, scene, camera, controls, canvas },
-  cameraPose: (): CameraPose => ({ position: v3(camera.position), target: v3(controls.target), up: v3(camera.up), fov: camera.fov }),
+  three: { renderer, scene, get camera() { return camera; }, controls, canvas },
+  cameraPose: (): CameraPose => ({ position: v3(camera.position), target: v3(controls.target), up: v3(camera.up), fov: persp.fov }),
   // up stays Z (OrbitControls fixes it at construction); fov stays the viewer's
   setCameraPose: (p) => flyTo(new THREE.Vector3(...p.target), new THREE.Vector3(...p.position)),
   fitRefs,

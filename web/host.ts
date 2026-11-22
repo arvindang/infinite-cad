@@ -73,7 +73,7 @@ export interface ViewerHost {
   /** The hit of the last canvas click or tap (phones anchor comments with it). */
   lastHit(): Hit | null;
 
-  three: { renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera; controls: OrbitControls; canvas: HTMLCanvasElement };
+  three: { renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera | THREE.OrthographicCamera; controls: OrbitControls; canvas: HTMLCanvasElement };
   cameraPose(): CameraPose;
   /** Fly the camera to a pose's position and target (e.g. the one a comment was made from); up stays +Z. */
   setCameraPose(pose: CameraPose): void;

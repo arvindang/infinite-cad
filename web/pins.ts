@@ -69,6 +69,7 @@ export class PinPlacer {
   private size = 0;
   private ray = new THREE.Raycaster();
   private v = new THREE.Vector3();
+  private o = new THREE.Vector3();
 
   constructor(private host: ViewerHost) {
     this.ray.firstHitOnly = true;
@@ -121,9 +122,11 @@ export class PinPlacer {
     const off = n.z > 1 || n.z < -1 || x < r.left + left || x > r.right - right || y < r.top || y > r.bottom;
     let behind = false;
     if (occlusion && !off) {
-      const dir = this.v.copy(p).sub(camera.position);
+      // orthographic: the sight line is the view direction through p, not a line from the eye
+      const from = "isOrthographicCamera" in camera ? camera.getWorldDirection(this.o).multiplyScalar(-1e5).add(p) : camera.position;
+      const dir = this.v.copy(p).sub(from);
       const dist = dir.length();
-      this.ray.set(camera.position, dir.divideScalar(dist));
+      this.ray.set(from, dir.divideScalar(dist));
       this.ray.far = dist;
       const hit = this.ray.intersectObjects(this.host.meshes().filter((m) => m.visible), false)[0];
       behind = !!hit && hit.distance < dist - Math.max(1e-3 * this.modelSize(), 0.05);

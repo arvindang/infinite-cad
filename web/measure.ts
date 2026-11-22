@@ -20,6 +20,10 @@ export interface Dim {
   side: THREE.Vector3; // unit, perpendicular to the line: arrowheads open toward it
   value: number; // mm
   dia?: boolean;
+  /** Text before the value ("4× on "). */
+  prefix?: string;
+  /** A construction circle drawn dashed with the dimension (a pattern's pitch circle). */
+  circle?: { center: THREE.Vector3; normal: THREE.Vector3; r: number };
   priority: number; // higher wins when labels overlap
 }
 
@@ -172,6 +176,46 @@ export function faceDims(pos: Float32Array, start: number, count: number, gap: n
   return { shape: "other", dims: boxDims(box, gap, priority) };
 }
 
+/**
+ * The pitch circle a circular pattern's instances sit on, from each instance's center: a dashed
+ * construction circle with its Ø across it. Two instances: the circle through both, about their midpoint.
+ */
+export function pitchCircle(centers: THREE.Vector3[], priority = 6): Dim | null {
+  if (centers.length < 2) return null;
+  const mid = centers.reduce((s, p) => s.add(p), new THREE.Vector3()).divideScalar(centers.length);
+  // plane normal (Newell), or for two points the axis closest to Z that's perpendicular to them
+  const normal = new THREE.Vector3();
+  for (let i = 0; i < centers.length; i++) {
+    const a = centers[i].clone().sub(mid), b = centers[(i + 1) % centers.length].clone().sub(mid);
+    normal.add(a.cross(b));
+  }
+  if (normal.lengthSq() < 1e-12) {
+    const along = centers[1].clone().sub(centers[0]).normalize();
+    normal.set(0, 0, 1).addScaledVector(along, -along.z);
+    if (normal.lengthSq() < 1e-6) normal.copy(perpendicular(along));
+  }
+  normal.normalize();
+  const u = perpendicular(normal), v = normal.clone().cross(u);
+  let center: THREE.Vector3, r: number;
+  if (centers.length === 2) {
+    center = mid;
+    r = centers[0].distanceTo(centers[1]) / 2;
+  } else {
+    const fit = fitCircle(centers.map((p) => [p.clone().sub(mid).dot(u), p.clone().sub(mid).dot(v)]));
+    if (!fit) return null;
+    center = mid.clone().addScaledVector(u, fit.x).addScaledVector(v, fit.y);
+    r = fit.r;
+  }
+  if (r <= EPS) return null;
+  // the Ø line runs through the first instance, so it reads as "this hole to the opposite side"
+  const d = centers[0].clone().sub(center).normalize();
+  return {
+    from: center.clone().addScaledVector(d, -r), to: center.clone().addScaledVector(d, r), ext: [],
+    side: normal.clone().cross(d), value: 2 * r, dia: true, prefix: `${centers.length}× on `,
+    circle: { center, normal, r }, priority,
+  };
+}
+
 /** Least-squares circle through 2D points (Kåsa); null unless the points really are on one. */
 function fitCircle(pts: number[][]): { x: number; y: number; r: number } | null {
   if (pts.length < 3) return null;
@@ -200,6 +244,8 @@ export class DimLayer {
   readonly group = new THREE.Group();
   private lineMat = new THREE.LineBasicMaterial({ depthTest: false, transparent: true });
   private extMat = new THREE.LineBasicMaterial({ depthTest: false, transparent: true, opacity: 0.45 });
+  private dashMats: THREE.LineDashedMaterial[] = [];
+  private color = 0;
   private dims: Dim[] = [];
   private labels: HTMLElement[] = [];
   private sizes: [number, number][] = [];
@@ -210,6 +256,8 @@ export class DimLayer {
   }
 
   setColor(hex: number) {
+    this.color = hex;
+    for (const m of this.dashMats) m.color.setHex(hex);
     this.lineMat.color.setHex(hex);
     this.extMat.color.setHex(hex);
   }
@@ -222,6 +270,7 @@ export class DimLayer {
     for (const d of this.dims) {
       push(main, d.from, d.to);
       for (const [p, q] of d.ext) push(ext, p, q);
+      if (d.circle) this.addCircle(d.circle, ext, arrow);
       const dir = d.to.clone().sub(d.from);
       const len = dir.length();
       if (len < 1e-9) continue;
@@ -244,7 +293,7 @@ export class DimLayer {
     this.labels = this.dims.map((d) => {
       const el = document.createElement("div");
       el.className = "dim";
-      el.textContent = `${d.dia ? "Ø " : ""}${formatLength(d.value, unit)}`;
+      el.textContent = `${d.prefix ?? ""}${d.dia ? "Ø " : ""}${formatLength(d.value, unit)}`;
       this.root.append(el);
       return el;
     });
@@ -252,8 +301,32 @@ export class DimLayer {
     this.sizes = this.labels.map((el) => [el.offsetWidth, el.offsetHeight]);
   }
 
+  /** A dashed construction circle, and a center mark (into the extension lines). */
+  private addCircle(c: NonNullable<Dim["circle"]>, ext: number[], arrow: number) {
+    const u = perpendicular(c.normal), v = c.normal.clone().cross(u);
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i <= 128; i++) {
+      const t = (i / 128) * Math.PI * 2;
+      pts.push(c.center.clone().addScaledVector(u, Math.cos(t) * c.r).addScaledVector(v, Math.sin(t) * c.r));
+    }
+    const dash = (Math.PI * 2 * c.r) / 72;
+    const mat = new THREE.LineDashedMaterial({ color: this.color, depthTest: false, transparent: true, opacity: 0.8, dashSize: dash * 0.6, gapSize: dash * 0.4 });
+    this.dashMats.push(mat);
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat);
+    line.computeLineDistances();
+    line.renderOrder = 10;
+    this.group.add(line);
+    const m = Math.min(arrow, c.r * 0.15);
+    for (const a of [u, v]) {
+      const p = c.center.clone().addScaledVector(a, m), q = c.center.clone().addScaledVector(a, -m);
+      ext.push(p.x, p.y, p.z, q.x, q.y, q.z);
+    }
+  }
+
   clear() {
     for (const c of this.group.children) (c as THREE.LineSegments).geometry.dispose();
+    for (const m of this.dashMats) m.dispose();
+    this.dashMats = [];
     this.group.clear();
     for (const el of this.labels) el.remove();
     this.labels = [];

@@ -14,6 +14,7 @@
 <div class="dims" id="dims" aria-hidden="true" hidden></div>
 <!-- comments:overlay --><div class="pins" id="pins" hidden></div><!-- /comments:overlay -->
 <div class="tip" id="tip" hidden></div>
+<svg class="triad" id="triad" viewBox="-48 -48 96 96" role="group" aria-label="Axes: click an axis to look along it"></svg>
 
 <header class="bar">
   <div class="group">
@@ -55,10 +56,11 @@
           <button class="menu-item" role="menuitemradio" aria-checked="false" data-view="7">Iso <kbd>7</kbd></button>
         </div>
       </div>
+      <button class="btn" id="orthoBtn" aria-pressed="false" title="Perspective or orthographic projection (P). Front, back, left, right, top and bottom switch to orthographic."><span id="orthoLabel">Persp</span> <kbd>P</kbd></button>
       <div class="sep"></div>
       <button class="btn" id="xrayBtn" aria-pressed="false" title="X-ray: see through the model (X)">X-ray <kbd>X</kbd></button>
       <button class="btn" id="measureBtn" aria-pressed="false" title="Measure: dimensions of every part, or only of the selection (M)">Measure <kbd>M</kbd></button>
-      <button class="btn" id="unitBtn" title="Units: millimetres, inches or metres (U)" hidden><span id="unitLabel">mm</span> <kbd class="k2">U</kbd></button>
+      <button class="btn muted" id="unitBtn" title="Units for measurements: millimetres, inches or metres (U)"><span id="unitLabel">mm</span> <kbd class="k2">U</kbd></button>
       <button class="btn" id="themeBtn" title="Light or dark (T)" aria-label="Theme"><svg class="not-phone" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg><span class="phone-only">Theme</span> <kbd class="k2">T</kbd></button>
     </div>
     <div class="group">

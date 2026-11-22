@@ -72,7 +72,17 @@ export type FaceShape = "plane" | "disc" | "cylinder" | "other";
  * Dimensions of one face: its triangles are `count` vertices from `start` in a non-indexed
  * position buffer. `gap` is how far dimension lines stand off the face.
  */
-export function faceDims(pos: Float32Array, start: number, count: number, gap: number, priority = 5): { shape: FaceShape; dims: Dim[] } {
+export interface FaceDims {
+  shape: FaceShape;
+  dims: Dim[];
+  /** Flat faces: the outward normal and a point on the face. */
+  normal?: THREE.Vector3;
+  point?: THREE.Vector3;
+  /** Round walls: the axis direction (point is on the axis). */
+  axis?: THREE.Vector3;
+}
+
+export function faceDims(pos: Float32Array, start: number, count: number, gap: number, priority = 5): FaceDims {
   const tris = count / 3;
   if (!tris) return { shape: "other", dims: [] };
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
@@ -114,7 +124,7 @@ export function faceDims(pos: Float32Array, start: number, count: number, gap: n
     const round = du > EPS && Math.abs(du - dv) < 0.01 * Math.max(du, dv) &&
       verts.every((p) => Math.hypot(p.dot(u) - cu, p.dot(v) - cv) <= r * 1.005);
     if (round) {
-      return { shape: "disc", dims: [{ from: at(cu - r, cv), to: at(cu + r, cv), ext: [], side: v.clone(), value: 2 * r, dia: true, priority }] };
+      return { shape: "disc", normal: N, point: at(cu, cv), dims: [{ from: at(cu - r, cv), to: at(cu + r, cv), ext: [], side: v.clone(), value: 2 * r, dia: true, priority }] };
     }
     const dims: Dim[] = [];
     if (du > EPS) dims.push({
@@ -127,7 +137,7 @@ export function faceDims(pos: Float32Array, start: number, count: number, gap: n
       ext: [[at(u1, v0), at(u1 + gap * 1.3, v0)], [at(u1, v1), at(u1 + gap * 1.3, v1)]],
       side: u.clone(), value: dv, priority,
     });
-    return { shape: "plane", dims };
+    return { shape: "plane", normal: N, point: at((u0 + u1) / 2, (v0 + v1) / 2), dims };
   }
 
   // cylindrical: every normal is perpendicular to one axis, every vertex the same distance from it
@@ -166,7 +176,7 @@ export function faceDims(pos: Float32Array, start: number, count: number, gap: n
             side: d.clone(), value: h1 - h0, priority,
           });
         }
-        return { shape: "cylinder", dims };
+        return { shape: "cylinder", axis, point: centre((h0 + h1) / 2), dims };
       }
     }
   }

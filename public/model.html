@@ -59,6 +59,7 @@
       <button class="btn" id="orthoBtn" aria-pressed="false" title="Perspective or orthographic projection (P). Front, back, left, right, top and bottom switch to orthographic."><span id="orthoLabel">Persp</span> <kbd>P</kbd></button>
       <div class="sep"></div>
       <button class="btn" id="xrayBtn" aria-pressed="false" title="X-ray: see through the model (X)">X-ray <kbd>X</kbd></button>
+      <button class="btn" id="sectionBtn" aria-pressed="false" title="Section: cut the model open to see inside (S) · Shift+S flips the side">Section <kbd>S</kbd></button>
       <button class="btn" id="measureBtn" aria-pressed="false" title="Measure: dimensions of every part, or only of the selection (M)">Measure <kbd>M</kbd></button>
       <button class="btn muted" id="unitBtn" title="Units for measurements: millimetres, inches or metres (U)"><span id="unitLabel">mm</span> <kbd class="k2">U</kbd></button>
       <button class="btn" id="themeBtn" title="Light or dark (T)" aria-label="Theme"><svg class="not-phone" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg><span class="phone-only">Theme</span> <kbd class="k2">T</kbd></button>
@@ -148,6 +149,19 @@
 <div class="cmp-bar" id="cmpBar" role="toolbar" aria-label="Compare versions" hidden></div>
 <!-- /history:panels -->
 <div class="sel-bar" id="selBar" role="status"></div>
+<div class="section-bar" id="sectionBar" role="group" aria-label="Section" hidden>
+  <span class="label">Section</span>
+  <div class="seg">
+    <button class="btn" data-axis="0" aria-pressed="false" title="Cut across X">X</button>
+    <button class="btn" data-axis="1" aria-pressed="false" title="Cut across Y">Y</button>
+    <button class="btn" data-axis="2" aria-pressed="false" title="Cut across Z">Z</button>
+    <button class="btn" id="sectionFaceBtn" aria-pressed="false" title="Cut along the selected face: parallel to a flat face, or through the axis of a hole or boss">Face</button>
+  </div>
+  <input type="range" id="sectionPos" min="0" max="1000" step="1" aria-label="Where the cut is">
+  <span class="at" id="sectionAt"></span>
+  <button class="btn" id="sectionFlipBtn" title="Show the other half (Shift+S)">Flip <kbd>⇧S</kbd></button>
+  <button class="btn" id="sectionCloseBtn" title="Close the section (S or Esc)" aria-label="Close the section">✕</button>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script type="module" src="/js/viewer.js"></script>
 </body>

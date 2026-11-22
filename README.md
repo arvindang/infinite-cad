@@ -91,6 +91,7 @@ Viewer (web/) ──► /api/models/:id/...  ──►  CadModel Durable Object 
 | P | Perspective / orthographic |
 | Axis triad (bottom right) | Shows which way X (red), Y (green) and Z (blue) point; click an end to look along it (same as 1–6) |
 | X | X-ray |
+| S / Shift+S | Section: cut the model open to see inside (along the axis you're looking down most, or the selected face: parallel to a flat face, through the axis of a hole) / flip to the other half. The bar picks X, Y, Z or Face and slides the cut, with its position in the current units |
 | M | Measure: every part's X/Y/Z, hole Ø and circular patterns' pitch circles; with a selection, only its dimensions (a selected circular pattern shows its pitch circle even outside Measure) |
 | U | Units for measurements: mm, inches, metres |
 | T | Light / dark |

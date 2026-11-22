@@ -4,7 +4,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { type Body, disposeBody, toBody } from "./mesh";
 import { type ExportFormat, FORMATS, exportBodies } from "./export";
-import { type Dim, DimLayer, type Unit, UNITS, boxDims, faceDims, pitchCircle } from "./measure";
+import { type Dim, DimLayer, type Unit, UNITS, boxDims, faceDims, formatLength, pitchCircle } from "./measure";
+import { Section } from "./section";
 import type { BuildReply, BuildRequest } from "./kernel-worker";
 import type { StepReply, StepRequest } from "./step-worker";
 import { parseRef, type CadDoc, type Ref, type Vec3 } from "../src/schema.ts";
@@ -62,7 +63,8 @@ const pal = () => PALETTE[theme];
 
 // ---------- three ----------
 const canvas = $<HTMLCanvasElement>("#view");
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true }); // stencil: section caps
+renderer.localClippingEnabled = true;
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 const scene = new THREE.Scene();
 const persp = new THREE.PerspectiveCamera(30, 1, 0.1, 100000);
@@ -87,6 +89,8 @@ const material = new THREE.MeshStandardMaterial({
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, // lines sit on top
 });
 const edgeMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.55 });
+const section = new Section(scene, [material, edgeMaterial]);
+section.setColors(pal().body, pal().edge);
 let grid: THREE.GridHelper | null = null;
 
 // ---------- model ----------
@@ -129,6 +133,8 @@ function setModel(meshes: Body[], next: CadDoc) {
   }
   faceCache.clear();
   gapCache = 0;
+  section.attach(bodies.map((b) => b.mesh));
+  if (section.on) renderSection();
   sizeGrid();
   paintAll();
   refreshDims();
@@ -223,6 +229,7 @@ function setSelection(keys: string[], opts: { fit?: boolean; hash?: boolean } = 
   renderSelBar();
   markTree();
   refreshDims();
+  if (section.on) renderSection(); // the Face button follows the selection
   emit("selection");
 }
 /** The address bar is always the link you'd copy, plus the modules' params (pinned version, compare, thread). */
@@ -262,7 +269,8 @@ function pickHit(x: number, y: number): Hit | null {
   const r = canvas.getBoundingClientRect();
   ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  const hit = raycaster.intersectObjects(bodies.map((b) => b.mesh), false)[0];
+  raycaster.firstHitOnly = !section.on; // sectioned: the first hit on the kept side
+  const hit = raycaster.intersectObjects(bodies.map((b) => b.mesh), false).find((h) => section.keeps(h.point));
   if (!hit?.face) return null;
   const b = bodies.find((x) => x.mesh === hit.object)!;
   // The BVH reorders the index it adds, so faceIndex isn't our triangle order; the
@@ -903,6 +911,7 @@ function setTheme(t: Theme) {
   sizeGrid();
   paintAll();
   dimLayer.setColor(pal().dim);
+  section.setColors(pal().body, pal().edge);
   emit("theme");
 }
 let xray = false;
@@ -914,6 +923,85 @@ function setXray(on: boolean) {
   material.needsUpdate = true;
   $("#xrayBtn").setAttribute("aria-pressed", String(on));
   needsRender = true;
+}
+// ---------- section ----------
+type SectionAim = { kind: "axis"; axis: 0 | 1 | 2 } | { kind: "face"; ref: string; d0: number };
+let sectionAim: SectionAim = { kind: "axis", axis: 1 };
+const AXIS_DIRS = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+const toCamera = () => camera.getWorldDirection(new THREE.Vector3()).negate();
+/** A face the plane can follow: parallel to a flat face, or through the axis of a round one. */
+function sectionFace(): { ref: string; n: THREE.Vector3; d: number; d0: number } | null {
+  const keys = selection.flatMap(expand);
+  if (keys.length !== 1 || !refInfo.has(keys[0])) return null;
+  const f = dimsOfFace(keys[0]);
+  if (f.normal && f.point) {
+    const n = f.normal.clone();
+    return { ref: keys[0], n, d: section.center(n), d0: n.dot(f.point) };
+  }
+  if (f.axis && f.point) {
+    // the plane through the axis that faces the camera most
+    const n = toCamera().projectOnPlane(f.axis);
+    if (n.lengthSq() < 1e-6) n.copy(new THREE.Vector3(0, 0, 1).cross(f.axis).lengthSq() > 1e-6 ? new THREE.Vector3(0, 0, 1).cross(f.axis) : new THREE.Vector3(1, 0, 0));
+    n.normalize();
+    const d = n.dot(f.point);
+    return { ref: keys[0], n, d, d0: d };
+  }
+  return null;
+}
+/** An axis plane, its removed half toward the camera. */
+function aimAxis(axis: 0 | 1 | 2, keep = false) {
+  const n = AXIS_DIRS[axis].clone();
+  if (toCamera().getComponent(axis) < 0) n.negate();
+  const same = keep && sectionAim.kind === "axis" && sectionAim.axis === axis;
+  const at = same ? (n.dot(section.n) > 0 ? section.d : -section.d) : null;
+  section.aim(n, at ?? section.center(n));
+  sectionAim = { kind: "axis", axis };
+}
+function aimFace(): boolean {
+  const f = sectionFace();
+  if (!f) return false;
+  section.aim(f.n, f.d);
+  sectionAim = { kind: "face", ref: f.ref, d0: f.d0 };
+  return true;
+}
+function setSection(on: boolean) {
+  if (on && !section.on) {
+    // the selected face, else the axis you're looking along most
+    if (!aimFace()) {
+      const v = toCamera();
+      const a = [Math.abs(v.x), Math.abs(v.y), Math.abs(v.z)];
+      aimAxis(a.indexOf(Math.max(...a)) as 0 | 1 | 2);
+    }
+  }
+  section.set(on);
+  $("#sectionBtn").setAttribute("aria-pressed", String(on));
+  $("#sectionBar").hidden = !on;
+  if (on) renderSection();
+  needsRender = true;
+}
+function flipSection() {
+  section.flip();
+  if (sectionAim.kind === "face") sectionAim.d0 = -sectionAim.d0;
+  renderSection();
+  needsRender = true;
+}
+const SLIDER = 1000;
+function renderSection() {
+  const [lo, hi] = section.range();
+  const slider = $<HTMLInputElement>("#sectionPos");
+  slider.value = String(Math.round(((section.d - lo) / (hi - lo || 1)) * SLIDER));
+  for (const b of document.querySelectorAll<HTMLElement>("#sectionBar [data-axis]"))
+    b.setAttribute("aria-pressed", String(sectionAim.kind === "axis" && sectionAim.axis === Number(b.dataset.axis)));
+  $("#sectionFaceBtn").setAttribute("aria-pressed", String(sectionAim.kind === "face"));
+  $<HTMLButtonElement>("#sectionFaceBtn").disabled = sectionAim.kind !== "face" && !sectionFace();
+  const at = $("#sectionAt");
+  if (sectionAim.kind === "axis") {
+    const sign = section.n.getComponent(sectionAim.axis);
+    at.textContent = `${"XYZ"[sectionAim.axis]} ${formatLength(section.d * sign, unit)}`;
+  } else {
+    const off = sectionAim.d0 - section.d;
+    at.textContent = `${Math.abs(off) < 1e-3 ? "on" : `${formatLength(off, unit)} from`} ${sectionAim.ref}`;
+  }
 }
 function stepFeature(dir: 1 | -1) {
   const ids = doc.parts.flatMap((p) => p.features.map((f) => f.id));
@@ -1047,6 +1135,7 @@ function cycleUnit() {
   $("#unitLabel").textContent = unit;
   if (!measuring) setMeasuring(true);
   else refreshDims(), renderSelBar();
+  if (section.on) renderSection();
   toast(`Units: ${unit === "in" ? "inches" : unit === "m" ? "metres" : "millimetres"}`, 900);
 }
 $("#unitLabel").textContent = unit;
@@ -1268,6 +1357,25 @@ $("#viewSheet").addEventListener("click", (e) => {
 });
 $("#fitBtn").addEventListener("click", () => (fitSelectionOrAll(), closeViewMenu()));
 $("#xrayBtn").addEventListener("click", () => setXray(!xray));
+$("#sectionBtn").addEventListener("click", () => setSection(!section.on));
+$("#sectionBar").addEventListener("click", (e) => {
+  const t = e.target as Element;
+  const axis = t.closest<HTMLElement>("[data-axis]")?.dataset.axis;
+  if (axis) aimAxis(Number(axis) as 0 | 1 | 2, true);
+  else if (t.closest("#sectionFaceBtn")) aimFace();
+  else if (t.closest("#sectionFlipBtn")) return flipSection();
+  else if (t.closest("#sectionCloseBtn")) return setSection(false);
+  else return;
+  renderSection();
+  needsRender = true;
+});
+$("#sectionPos").addEventListener("input", (e) => {
+  const [lo, hi] = section.range();
+  section.d = lo + ((hi - lo) * Number((e.target as HTMLInputElement).value)) / SLIDER;
+  section.update();
+  renderSection();
+  needsRender = true;
+});
 $("#measureBtn").addEventListener("click", () => setMeasuring(!measuring));
 $("#orthoBtn").addEventListener("click", () => setOrtho(!orthoOn));
 $("#unitBtn").addEventListener("click", cycleUnit);
@@ -1298,6 +1406,7 @@ addEventListener("keydown", (e) => {
     else if (escHandlers.some((h) => h.fn())) {}
     else if (selection.length) setSelection([]);
     else if (measuring) setMeasuring(false);
+    else if (section.on) setSection(false);
     else if (xray) setXray(false);
     else if (multi) (multi = false), renderSelBar();
   } else if (del && e.shiftKey) deleteModel();
@@ -1305,6 +1414,8 @@ addEventListener("keydown", (e) => {
   else if (!e.shiftKey && VIEWS[e.key]) setView(e.key);
   else if (e.code === "KeyF") fitSelectionOrAll();
   else if (e.code === "KeyX") setXray(!xray);
+  else if (e.code === "KeyS" && e.shiftKey) section.on ? flipSection() : setSection(true);
+  else if (e.code === "KeyS") setSection(!section.on);
   else if (e.code === "KeyP") setOrtho(!orthoOn), toast(orthoOn ? "Orthographic" : "Perspective", 700);
   else if (e.code === "KeyM") setMeasuring(!measuring);
   else if (e.code === "KeyU") cycleUnit();
@@ -1385,6 +1496,7 @@ function loop(now: number) {
   syncOrtho();
   if (needsRender) {
     needsRender = false;
+    section.group.visible = section.on && !bodiesHidden;
     if (split) renderSplit(split);
     else renderer.render(scene, camera);
     updateTriad();

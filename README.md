@@ -87,9 +87,11 @@ Viewer (web/) ──► /api/models/:id/...  ──►  CadModel Durable Object 
 | Tab / Shift+Tab | Step through features |
 | B / Shift+B | Features panel / expand or collapse every feature's faces |
 | F / Shift+1 | Fit the selection / the whole model (also the View menu) |
-| 1–7 | Front, back, left, right, top, bottom, iso (also the View menu) |
+| 1–7 | Front, back, left, right, top, bottom, iso (also the View menu); 1–6 switch to orthographic |
+| P | Perspective / orthographic |
+| Axis triad (bottom right) | Shows which way X (red), Y (green) and Z (blue) point; click an end to look along it (same as 1–6) |
 | X | X-ray |
-| M | Measure: every part's X/Y/Z and hole Ø; with a selection, only its dimensions |
+| M | Measure: every part's X/Y/Z, hole Ø and circular patterns' pitch circles; with a selection, only its dimensions (a selected circular pattern shows its pitch circle even outside Measure) |
 | U | Units for measurements: mm, inches, metres |
 | T | Light / dark |
 | E | Export menu, then 1–6: STL, 3MF, STEP (exact solids), GLB, OBJ, DXF (flat outline of the selected face or part, else every part) |

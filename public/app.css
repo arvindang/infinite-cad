@@ -182,6 +182,20 @@ body.working-on .errors { top: 104px; }
 .chip.gone { background: var(--panel-2); color: var(--muted); text-decoration: line-through; }
 .sel-bar .actions { display: flex; gap: 2px; flex: none; }
 
+#unitBtn.muted { color: var(--muted); }
+
+/* ---------- axis triad: which way X, Y, Z point; click an end to look along it ---------- */
+.triad { position: fixed; right: calc(var(--right-inset, 0px) + 12px); bottom: calc(var(--dock) + 12px); width: 112px; height: 112px; z-index: 7; overflow: visible; user-select: none; }
+.triad line { stroke-width: 2.5; stroke-linecap: round; }
+.triad .end { cursor: pointer; }
+.triad .end text { font: 600 11px var(--mono); fill: #fff; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.triad .end:hover circle { stroke: var(--text); stroke-width: 1.5; }
+.triad .face { cursor: pointer; }
+.triad .face polygon { fill: var(--panel); fill-opacity: 0.88; stroke: var(--muted); stroke-width: 0.75; stroke-linejoin: round; }
+.triad .face text { font: 700 5px system-ui, sans-serif; letter-spacing: 0.04em; fill: var(--muted); opacity: var(--shade); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.triad .face:hover polygon { fill-opacity: 1; stroke: var(--accent); stroke-width: 1.25; }
+.triad .face:hover text { fill: var(--accent); }
+
 /* ---------- toast ---------- */
 .toast {
   position: fixed; left: 12px; right: 12px; margin-inline: auto; width: fit-content; bottom: calc(var(--dock) + 70px); transform: translateY(8px); z-index: 30;
@@ -289,6 +303,7 @@ body.tree-open .empty { padding-left: calc(var(--tree) + 24px); }
   .errors { top: auto; bottom: calc(var(--dock) + 64px); left: 8px; right: 8px; width: auto; max-height: 30dvh; }
   .pop { top: calc(56px + env(safe-area-inset-top)); left: 8px; right: 8px; width: auto; max-height: calc(100dvh - var(--dock) - 72px); overflow: auto; touch-action: pan-y; }
   .toast { bottom: calc(var(--dock) + 64px); }
+  .triad { bottom: auto; top: calc(56px + env(safe-area-inset-top)); right: 4px; width: 92px; height: 92px; }
 }
 @media (max-width: 430px) {
   nav.tools .btn { padding: 0 8px; }

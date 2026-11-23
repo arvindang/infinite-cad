@@ -925,18 +925,19 @@ function setXray(on: boolean) {
   needsRender = true;
 }
 // ---------- section ----------
-type SectionAim = { kind: "axis"; axis: 0 | 1 | 2 } | { kind: "face"; ref: string; d0: number };
+/** A face aim keeps its own normal and position along it, so flipping doesn't change what the readout means. */
+type SectionAim = { kind: "axis"; axis: 0 | 1 | 2 } | { kind: "face"; ref: string; normal: THREE.Vector3; d0: number; flat: boolean };
 let sectionAim: SectionAim = { kind: "axis", axis: 1 };
 const AXIS_DIRS = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
 const toCamera = () => camera.getWorldDirection(new THREE.Vector3()).negate();
 /** A face the plane can follow: parallel to a flat face, or through the axis of a round one. */
-function sectionFace(): { ref: string; n: THREE.Vector3; d: number; d0: number } | null {
+function sectionFace(): { ref: string; n: THREE.Vector3; d: number; d0: number; flat: boolean } | null {
   const keys = selection.flatMap(expand);
   if (keys.length !== 1 || !refInfo.has(keys[0])) return null;
   const f = dimsOfFace(keys[0]);
   if (f.normal && f.point) {
     const n = f.normal.clone();
-    return { ref: keys[0], n, d: section.center(n), d0: n.dot(f.point) };
+    return { ref: keys[0], n, d: section.center(n), d0: n.dot(f.point), flat: true };
   }
   if (f.axis && f.point) {
     // the plane through the axis that faces the camera most
@@ -944,7 +945,7 @@ function sectionFace(): { ref: string; n: THREE.Vector3; d: number; d0: number }
     if (n.lengthSq() < 1e-6) n.copy(new THREE.Vector3(0, 0, 1).cross(f.axis).lengthSq() > 1e-6 ? new THREE.Vector3(0, 0, 1).cross(f.axis) : new THREE.Vector3(1, 0, 0));
     n.normalize();
     const d = n.dot(f.point);
-    return { ref: keys[0], n, d, d0: d };
+    return { ref: keys[0], n, d, d0: d, flat: false };
   }
   return null;
 }
@@ -961,7 +962,7 @@ function aimFace(): boolean {
   const f = sectionFace();
   if (!f) return false;
   section.aim(f.n, f.d);
-  sectionAim = { kind: "face", ref: f.ref, d0: f.d0 };
+  sectionAim = { kind: "face", ref: f.ref, normal: f.n.clone(), d0: f.d0, flat: f.flat };
   return true;
 }
 function setSection(on: boolean) {
@@ -981,7 +982,6 @@ function setSection(on: boolean) {
 }
 function flipSection() {
   section.flip();
-  if (sectionAim.kind === "face") sectionAim.d0 = -sectionAim.d0;
   renderSection();
   needsRender = true;
 }
@@ -993,14 +993,22 @@ function renderSection() {
   for (const b of document.querySelectorAll<HTMLElement>("#sectionBar [data-axis]"))
     b.setAttribute("aria-pressed", String(sectionAim.kind === "axis" && sectionAim.axis === Number(b.dataset.axis)));
   $("#sectionFaceBtn").setAttribute("aria-pressed", String(sectionAim.kind === "face"));
-  $<HTMLButtonElement>("#sectionFaceBtn").disabled = sectionAim.kind !== "face" && !sectionFace();
+  // not disabled: a click without a usable face says what to select
+  const ready = sectionAim.kind === "face" || !!sectionFace();
+  $("#sectionFaceBtn").setAttribute("aria-disabled", String(!ready));
+  $("#sectionFaceBtn").title = ready
+    ? "Cut along the selected face: parallel to a flat face, or through the axis of a hole or boss"
+    : "Select a face first: a flat face to cut parallel to it, or a hole's wall to cut through its middle";
   const at = $("#sectionAt");
   if (sectionAim.kind === "axis") {
     const sign = section.n.getComponent(sectionAim.axis);
     at.textContent = `${"XYZ"[sectionAim.axis]} ${formatLength(section.d * sign, unit)}`;
   } else {
-    const off = sectionAim.d0 - section.d;
-    at.textContent = `${Math.abs(off) < 1e-3 ? "on" : `${formatLength(off, unit)} from`} ${sectionAim.ref}`;
+    // where the cut is along the face's own normal: flat faces read inside (into the solid) or outside, round ones from the axis
+    const off = Math.sign(section.n.dot(sectionAim.normal)) * section.d - sectionAim.d0;
+    const len = formatLength(Math.abs(off), unit);
+    at.textContent = Math.abs(off) < 1e-3 ? `on ${sectionAim.flat ? "" : "the axis of "}${sectionAim.ref}`
+      : sectionAim.flat ? `${len} ${off < 0 ? "inside" : "outside"} ${sectionAim.ref}` : `${len} off the axis of ${sectionAim.ref}`;
   }
 }
 function stepFeature(dir: 1 | -1) {
@@ -1362,7 +1370,9 @@ $("#sectionBar").addEventListener("click", (e) => {
   const t = e.target as Element;
   const axis = t.closest<HTMLElement>("[data-axis]")?.dataset.axis;
   if (axis) aimAxis(Number(axis) as 0 | 1 | 2, true);
-  else if (t.closest("#sectionFaceBtn")) aimFace();
+  else if (t.closest("#sectionFaceBtn")) {
+    if (!aimFace()) return void toast(selection.length ? "Face needs one flat face or one hole wall selected" : "Select a face first: a flat face, or a hole's wall", 2200);
+  }
   else if (t.closest("#sectionFlipBtn")) return flipSection();
   else if (t.closest("#sectionCloseBtn")) return setSection(false);
   else return;

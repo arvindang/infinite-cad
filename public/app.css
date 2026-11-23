@@ -196,6 +196,7 @@ body.tree-open .section-bar { left: calc(var(--tree) + 24px); }
 .section-bar .seg { display: flex; gap: 2px; }
 .section-bar .seg .btn { min-width: 30px; justify-content: center; }
 .section-bar .btn[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.section-bar .btn[aria-disabled="true"] { color: var(--muted); opacity: 0.6; }
 .section-bar input[type="range"] { width: 160px; accent-color: var(--accent); }
 .section-bar .at { font: 12px var(--mono); color: var(--muted); min-width: 11ch; white-space: nowrap; }
 
